@@ -21,7 +21,6 @@ import othello_utils
 from chess_utils import PlayerColor, Config
 import argparse
 import os
-import torch.nn.utils.rnn as rnn_utils
 
 
 # %%
@@ -129,7 +128,6 @@ class LinearProbeData:
     model: HookedTransformer
     custom_indices: torch.Tensor
     board_seqs_int: torch.Tensor
-    is_valid_mask: torch.Tensor
     board_seqs_string: list[str]
     skill_stack: torch.Tensor
     user_state_dict_one_hot_mapping: Optional[dict[int, int]] = None
@@ -257,23 +255,23 @@ def get_board_seqs_string(df: pd.DataFrame) -> list[str]:
         return get_othello_seqs_string(df)
 
     key = "transcript"
-    # row_length = len(df[key].iloc[0])
+    row_length = len(df[key].iloc[0])
 
-    # assert all(
-    #     df[key].apply(lambda x: len(x) == row_length)
-    # ), "Not all transcripts are of length {}".format(row_length)
+    assert all(
+        df[key].apply(lambda x: len(x) == row_length)
+    ), "Not all transcripts are of length {}".format(row_length)
 
     board_seqs_string_Bl = df[key]
 
     logger.info(
-        f"Number of games: {len(board_seqs_string_Bl)}"#,length of a game in chars: {len(board_seqs_string_Bl[0])}"
+        f"Number of games: {len(board_seqs_string_Bl)},length of a game in chars: {len(board_seqs_string_Bl[0])}"
     )
-    # n=0
-    # for seq in board_seqs_string_Bl:
-    #     if '#' in seq:
-    #         print(seq)
-    #         n+=1
-    # print(n/len(board_seqs_string_Bl))
+    n=0
+    for seq in board_seqs_string_Bl:
+        if '#' in seq:
+            print(seq)
+            n+=1
+    print(n/len(board_seqs_string_Bl))
     return board_seqs_string_Bl
 
 
@@ -292,9 +290,7 @@ def get_board_seqs_int(df: pd.DataFrame) -> Int[Tensor, "num_games pgn_str_lengt
 
     encoded_df = df["transcript"].apply(encode)
     logger.info(encoded_df.head())
-    
-    board_seqs_int_Bl = rnn_utils.pad_sequence([torch.Tensor(toks).to(dtype=torch.int) for toks in encoded_df.apply(list).tolist()], batch_first=True, padding_value=0)
-
+    board_seqs_int_Bl = torch.tensor(encoded_df.apply(list).tolist())
     logger.info(f"board_seqs_int shape: {board_seqs_int_Bl.shape}")
     return board_seqs_int_Bl
 
@@ -325,20 +321,17 @@ def prepare_data_batch(
 ) -> tuple[
     Int[Tensor, "modes batch_size num_white_moves num_rows num_cols num_options"],
     dict[int, Float[Tensor, "batch_size num_white_moves d_model"]],
-    Int[Tensor, "batch_size num_white_moves"],
 ]:
     list_of_indices = indices.tolist()  # For indexing into the board_seqs_string list of strings
     games_int_Bl = probe_data.board_seqs_int[
         indices
     ]  # games_int shape (batch_size, pgn_str_length)
-    # print(games_int_Bl.shape)
     games_str_Bl = [probe_data.board_seqs_string[idx] for idx in list_of_indices]
     games_str_Bl = [s[:] for s in games_str_Bl]
     games_dots_BL = probe_data.custom_indices[indices]
     games_dots_BL = games_dots_BL[
         :, config.pos_start : config.pos_end
     ]  # games_dots shape (batch_size, num_white_moves)
-    valid_mask_sliced = probe_data.is_valid_mask[indices, config.pos_start : config.pos_end]
 
     if config.probing_for_skill:
         games_skill_B = probe_data.skill_stack[indices]  # games_skill shape (batch_size,)
@@ -422,7 +415,7 @@ def prepare_data_batch(
             indexed_resid_posts_BLD
         )  # shape (batch_size, num_white_moves, d_model)
 
-    return state_stack_one_hot_MBLRRC, resid_post_dict_BLD, valid_mask_sliced.to(DEVICE)
+    return state_stack_one_hot_MBLRRC, resid_post_dict_BLD
 
 
 def populate_probes_dict(
@@ -475,7 +468,6 @@ def linear_probe_forward_pass(
     state_stack_one_hot_MBLRRC: Int[Tensor, "modes batch num_white_moves rows cols options"],
     resid_post_BLD: Float[Tensor, "batch num_white_moves d_model"],
     one_hot_range: int,
-    is_valid_mask_BL: Float[Tensor, "batch num_white_moves"],
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Outputs are scalar tensors."""
     probe_out_MBLRRC = einsum(
@@ -483,26 +475,23 @@ def linear_probe_forward_pass(
         resid_post_BLD,
         linear_probe_MDRRC,
     )
-    expanded_mask = einops.rearrange(is_valid_mask_BL, "batch pos -> batch pos 1 1") # Needs to be [batch pos rows cols]
 
     assert probe_out_MBLRRC.shape == state_stack_one_hot_MBLRRC.shape
 
-
     accuracy = (
-        ((probe_out_MBLRRC[0].argmax(-1) == state_stack_one_hot_MBLRRC[0].argmax(-1)) * expanded_mask).float().mean()
+        (probe_out_MBLRRC[0].argmax(-1) == state_stack_one_hot_MBLRRC[0].argmax(-1)).float().mean()
     )
     preds = probe_out_MBLRRC[0].argmax(-1).float()
     true_labels = state_stack_one_hot_MBLRRC[0].argmax(-1).float()
-    TP = (((preds == 1) & (true_labels == 1))*expanded_mask).sum().float()
-    FP = (((preds == 1) & (true_labels == 0))*expanded_mask).sum().float()
-    FN = (((preds == 0) & (true_labels == 1))*expanded_mask).sum().float()
-    TN = (((preds == 0) & (true_labels == 0))*expanded_mask).sum().float()
+    TP = ((preds == 1) & (true_labels == 1)).sum().float()
+    FP = ((preds == 1) & (true_labels == 0)).sum().float()
+    FN = ((preds == 0) & (true_labels == 1)).sum().float()
+    TN = ((preds == 0) & (true_labels == 0)).sum().float()
 
-    fully_expanded_mask = einops.rearrange(is_valid_mask_BL, "batch pos -> 1 batch pos 1 1 1") # Needs to be [modes batch pos rows cols options]
     probe_log_probs_MBLRRC = probe_out_MBLRRC.log_softmax(-1)
     probe_correct_log_probs_MLRR = (
         einops.reduce(
-            probe_log_probs_MBLRRC * state_stack_one_hot_MBLRRC * fully_expanded_mask,
+            probe_log_probs_MBLRRC * state_stack_one_hot_MBLRRC,
             "modes batch pos rows cols options -> modes pos rows cols",
             "mean",
         )
@@ -561,7 +550,7 @@ def estimate_loss(
         for k in range(0, eval_iters, BATCH_SIZE):
             indices = split_indices[split][k : k + BATCH_SIZE]
 
-            state_stack_one_hot_MBLRRC, resid_post_dict_BLD, valid_mask_BL = prepare_data_batch(
+            state_stack_one_hot_MBLRRC, resid_post_dict_BLD = prepare_data_batch(
                 indices, probe_data, config, layers
             )
 
@@ -571,7 +560,6 @@ def estimate_loss(
                     state_stack_one_hot_MBLRRC,
                     resid_post_dict_BLD[layer],
                     one_hot_range,
-                    valid_mask_BL,
                 )
                 losses[layer].append(loss.item())
                 accuracies[layer].append(accuracy.item())
@@ -632,7 +620,7 @@ def train_linear_probe_cross_entropy(
 
             indices_B = full_train_indices[i : i + BATCH_SIZE]  # shape batch_size
 
-            state_stack_one_hot_MBLRRC, resid_post_dict_BLD, valid_mask_BL = prepare_data_batch(
+            state_stack_one_hot_MBLRRC, resid_post_dict_BLD = prepare_data_batch(
                 indices_B, probe_data, config, layers
             )
 
@@ -643,7 +631,6 @@ def train_linear_probe_cross_entropy(
                     state_stack_one_hot_MBLRRC,
                     resid_post_dict_BLD[layer],
                     one_hot_range,
-                    valid_mask_BL,
                 )
 
                 probes[layer].loss.backward()
@@ -753,26 +740,18 @@ def construct_linear_probe_data(
     user_state_dict_one_hot_mapping, df = process_dataframe(input_dataframe_file, config)
     df = df[:max_games]
     board_seqs_string_Bl = get_board_seqs_string(df)
+    board_seqs_int_Bl = get_board_seqs_int(df)
     skill_stack_B = None
     if config.probing_for_skill:
         skill_stack_B = get_skill_stack(config, df)
-    custom_indices, is_valid_mask_BL = chess_utils.find_custom_indices(
+    custom_indices = chess_utils.find_custom_indices(
         config.custom_indexing_function, board_seqs_string_Bl
     )
 
-    # pgn_str_length = len(board_seqs_string_Bl[0])
-    maxpgn_str_length = max([len(board_seqs_string_Bl[i]) for i in range(len(board_seqs_string_Bl))])
+    pgn_str_length = len(board_seqs_string_Bl[0])
     num_games = len(board_seqs_string_Bl)
 
-    board_seqs_int_Bl = get_board_seqs_int(df)
-    assert board_seqs_int_Bl.shape == (num_games, maxpgn_str_length)
-    # print(is_valid_mask_BL[0])
-    # print(len(board_seqs_string_Bl[0]))
-    # print(board_seqs_string_Bl[0])
-    # print(len(board_seqs_int_Bl[0]))
-    # print(board_seqs_int_Bl[0])
-    # assert False
-    # assert(board_seqs_int_Bl[is_valid_mask_BL].sum().item() == 0)
+    assert board_seqs_int_Bl.shape == (num_games, pgn_str_length)
 
     if skill_stack_B is not None:
         assert skill_stack_B.shape == (num_games,)
@@ -780,14 +759,13 @@ def construct_linear_probe_data(
     _, shortest_game_length_in_moves = custom_indices.shape
     assert custom_indices.shape == (num_games, shortest_game_length_in_moves)
 
-    # if not config.pos_end:
-    #     config.pos_end = shortest_game_length_in_moves
+    if not config.pos_end:
+        config.pos_end = shortest_game_length_in_moves
 
     probe_data = LinearProbeData(
         model=model,
         custom_indices=custom_indices,
         board_seqs_int=board_seqs_int_Bl,
-        is_valid_mask=is_valid_mask_BL,
         board_seqs_string=board_seqs_string_Bl,
         skill_stack=skill_stack_B,
         user_state_dict_one_hot_mapping=user_state_dict_one_hot_mapping,
@@ -845,15 +823,15 @@ def test_linear_probe_cross_entropy(
     for i in tqdm(range(0, num_games, BATCH_SIZE)):
         indices_B = full_test_indices[i : i + BATCH_SIZE]  # shape batch_size
 
-        state_stack_one_hot_MBLRRC, resid_post_dict_BLD, valid_mask_BL = prepare_data_batch(
+        state_stack_one_hot_MBLRRC, resid_post_dict_BLD = prepare_data_batch(
             indices_B, probe_data, config, [layer]
         )
+
         loss, accuracy, TP, TN, FP, FN  = linear_probe_forward_pass(
             linear_probe_MDRRC,
             state_stack_one_hot_MBLRRC,
             resid_post_dict_BLD[layer],
             one_hot_range,
-            valid_mask_BL,
         )
 
         accuracy_list.append(accuracy.item())
@@ -934,7 +912,8 @@ if __name__ == "__main__":
         saved_probes = [
             file
             for file in os.listdir(SAVED_PROBE_DIR)
-            if (os.path.isfile(os.path.join(SAVED_PROBE_DIR, file)) and (("layer_7" in file) or ("layer_6" in file)))
+            if (os.path.isfile(os.path.join(SAVED_PROBE_DIR, file)))
+            # if (os.path.isfile(os.path.join(SAVED_PROBE_DIR, file)) and (("layer_7" in file) or ("layer_6" in file)))
         ]
         # saved_probes = [
         #     "tf_lens_lichess_8layers_ckpt_no_optimizer_chess_skill_probe_layer_0.pth",

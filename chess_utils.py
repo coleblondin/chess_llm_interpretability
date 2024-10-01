@@ -9,7 +9,6 @@ from torch import Tensor
 from enum import Enum
 import othello_utils
 import numpy as np
-import torch.nn.utils.rnn as rnn_utils
 
 DEFAULT_DTYPE = torch.int8
 
@@ -375,7 +374,7 @@ def create_state_stacks(
         state_stacks_BlRR.append(state_stack_lRR)
 
     # Convert the list of tensors to a single tensor
-    final_state_stack_BlRR = rnn_utils.pad_sequence(state_stacks_BlRR, batch_first=True, padding_value=0)
+    final_state_stack_BlRR = torch.stack(state_stacks_BlRR)
     final_state_stack_MBlRR = final_state_stack_BlRR.unsqueeze(0)  # Add a dimension for the modes
     # Currently, there is just one mode and it isn't necessary. For now, I'm maintaining the dimension for future use.
     return final_state_stack_MBlRR
@@ -553,26 +552,23 @@ def find_odd_indices_offset_one(moves_string: str) -> list[int]:
     return incremented_indices
 
 
-def find_custom_indices(custom_indexing_fn: Callable, games_strs_Bl: list) -> list[torch.Tensor, torch.Tensor]:
 
-    # shortest_length = 1e6
-    longest_length = 0
+def find_custom_indices(custom_indexing_fn: Callable, games_strs_Bl: list) -> torch.Tensor:
+
+    shortest_length = 1e6
     custom_indices = []
     for pgn in games_strs_Bl:
-        indices = custom_indexing_fn(pgn) + [-1] # TODO check if this is legit: also take at the very end of the game
-        longest_length = max(longest_length, len(indices))
+        indices = custom_indexing_fn(pgn)
+        shortest_length = min(shortest_length, len(indices))
         custom_indices.append(indices)
-    print("Longest length:", longest_length)
+    print("Shortest length:", shortest_length)
 
-    padding_mask = torch.ones((len(custom_indices), longest_length), dtype=torch.bool)
-    # padding_lengths = torch.zeros(len(custom_indices), dtype=torch.int)
     for i, indices in enumerate(custom_indices):
-        padding_mask[i, len(indices):] = 0
-        custom_indices[i] = indices + [0]*(longest_length-len(indices))
+        custom_indices[i] = indices[:shortest_length]
 
     indices = torch.tensor(custom_indices, dtype=torch.int)
 
-    return indices, padding_mask
+    return indices
 
 
 def encode_string(meta: dict, s: str) -> list[int]:
