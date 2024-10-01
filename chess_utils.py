@@ -2,12 +2,16 @@ import chess
 import pandas as pd
 import torch
 from torch.nn import functional as F
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 from dataclasses import dataclass
 from jaxtyping import Int, Float, jaxtyped
 from torch import Tensor
 from enum import Enum
 import othello_utils
+import numpy as np
+import torch.nn.utils.rnn as rnn_utils
+
+DEFAULT_DTYPE = torch.int8
 
 # Mapping of chess pieces to integers
 PIECE_TO_INT = {
@@ -240,6 +244,41 @@ def board_to_last_self_move_state(board: chess.Board, skill: Optional[int] = Non
 
     return state_RR
 
+def board_to_can_checkmate_next(board: chess.Board, skill: Optional[int] = None) -> torch.Tensor:
+    """Given a chess board object, return a 1x1 torch.Tensor.
+    The 1x1 array indicates whether the current player can checkmate in the next move (1 = yes, 0 = no).
+    """
+    state = torch.zeros((1, 1), dtype=DEFAULT_DTYPE)
+    for move in board.legal_moves:
+        board.push(move)
+        if board.is_checkmate():
+            board.pop()
+            state[0][0] = 1
+            return state
+        board.pop()
+    return state
+
+def board_to_can_check_next(board: chess.Board, skill: Optional[int] = None) -> torch.Tensor:
+    """Given a chess board object, return a 1x1 torch.Tensor.
+    The 1x1 array indicates whether the current player can check in the next move (1 = yes, 0 = no).
+    """
+    state = torch.zeros((1, 1), dtype=DEFAULT_DTYPE)
+    for move in board.legal_moves:
+        board.push(move)
+        if board.is_check():
+            board.pop()
+            state[0][0] = 1
+            return state
+        board.pop()
+    return state
+
+
+def board_to_randi(board: chess.Board, skill: Optional[int] = None) -> torch.Tensor:
+    """Given a chess board object, return a 1x1 torch.Tensor.
+    The 1x1 array contains a random integer from 0-9 (inclusive)
+    """
+    return torch.Tensor([np.random.randint(10)]).reshape((1,1))
+
 
 def state_stack_to_chess_board(state_RR: torch.Tensor) -> chess.Board:
     """Given a state stack, return a chess.Board object.
@@ -336,7 +375,7 @@ def create_state_stacks(
         state_stacks_BlRR.append(state_stack_lRR)
 
     # Convert the list of tensors to a single tensor
-    final_state_stack_BlRR = torch.stack(state_stacks_BlRR)
+    final_state_stack_BlRR = rnn_utils.pad_sequence(state_stacks_BlRR, batch_first=True, padding_value=0)
     final_state_stack_MBlRR = final_state_stack_BlRR.unsqueeze(0)  # Add a dimension for the modes
     # Currently, there is just one mode and it isn't necessary. For now, I'm maintaining the dimension for future use.
     return final_state_stack_MBlRR
@@ -514,22 +553,26 @@ def find_odd_indices_offset_one(moves_string: str) -> list[int]:
     return incremented_indices
 
 
-def find_custom_indices(custom_indexing_fn: Callable, games_strs_Bl: list) -> torch.Tensor:
+def find_custom_indices(custom_indexing_fn: Callable, games_strs_Bl: list) -> list[torch.Tensor, torch.Tensor]:
 
-    shortest_length = 1e6
+    # shortest_length = 1e6
+    longest_length = 0
     custom_indices = []
     for pgn in games_strs_Bl:
-        indices = custom_indexing_fn(pgn)
-        shortest_length = min(shortest_length, len(indices))
+        indices = custom_indexing_fn(pgn) + [-1] # TODO check if this is legit: also take at the very end of the game
+        longest_length = max(longest_length, len(indices))
         custom_indices.append(indices)
-    print("Shortest length:", shortest_length)
+    print("Longest length:", longest_length)
 
+    padding_mask = torch.ones((len(custom_indices), longest_length), dtype=torch.bool)
+    # padding_lengths = torch.zeros(len(custom_indices), dtype=torch.int)
     for i, indices in enumerate(custom_indices):
-        custom_indices[i] = indices[:shortest_length]
+        padding_mask[i, len(indices):] = 0
+        custom_indices[i] = indices + [0]*(longest_length-len(indices))
 
     indices = torch.tensor(custom_indices, dtype=torch.int)
 
-    return indices
+    return indices, padding_mask
 
 
 def encode_string(meta: dict, s: str) -> list[int]:
@@ -542,6 +585,23 @@ def decode_list(meta: dict, l: list[int]) -> str:
     """Decode a list of integers into a string."""
     itos = meta["itos"]
     return "".join([itos[i] for i in l])
+
+
+def play_n_moves(model, meta: dict, pgn: str, n: int = 1) -> Tuple[str, list[str]]:
+    new_moves = []
+    next_move = ""
+    if pgn[0] != ";":
+        pgn = ";" + pgn 
+    if pgn[-1] != " ":
+        pgn = pgn + " "
+    while n > 0:
+        next_token = decode_list(meta, model(torch.tensor(encode_string(meta, pgn))).argmax(dim=-1).tolist()[0])[-1]
+        # pgn = pgn + next_token
+        next_move += next_token
+        if next_token == " ":
+            n -= 1
+            pgn += next_move
+    return pgn, new_moves
 
 
 # Adapted from nanogpt
@@ -615,6 +675,36 @@ class Config:
     player_color: PlayerColor = PlayerColor.WHITE
     othello: bool = False
 
+
+can_checkmate_config = Config(
+    min_val=0,
+    max_val=1,
+    custom_board_state_function=board_to_can_checkmate_next,
+    linear_probe_name="chess_can_checkmate_probe",
+    num_rows=1,
+    num_cols=1,
+    pos_start=25,
+)
+
+can_check_config = Config(
+    min_val=0,
+    max_val=1,
+    custom_board_state_function=board_to_can_check_next,
+    linear_probe_name="chess_can_check_probe",
+    num_rows=1,
+    num_cols=1,
+    # pos_start=25,
+)
+
+randi_probe_config = Config(
+    min_val=0,
+    max_val=9,
+    custom_board_state_function=board_to_randi,
+    linear_probe_name="chess_randi_probe",
+    num_rows=1,
+    num_cols=1,
+    # pos_start=25,
+)
 
 piece_config = Config(
     min_val=-6,
@@ -711,7 +801,7 @@ def find_config_by_name(config_name: str) -> Config:
     """
     Finds and returns the Config instance with a matching linear_probe_name.
     """
-    all_configs = [piece_config, color_config, random_config, skill_config, othello_config]
+    all_configs = [piece_config, color_config, random_config, skill_config, othello_config, can_check_config, can_checkmate_config]
     for config in all_configs:
         if config.linear_probe_name == config_name:
             return config

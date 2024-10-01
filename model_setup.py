@@ -1,3 +1,5 @@
+# %%
+
 # For nanogpt to transformer lens conversion
 import torch
 import einops
@@ -18,12 +20,14 @@ torch.set_grad_enabled(False)
 
 LOAD_AND_CONVERT_CHECKPOINT = True
 
-device = "cpu"
+# device = "cpu"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 MODEL_DIR = "models/"
 
 n_heads = 8
-n_layers = 8
+n_layers = 16
 d_model = 512
 
 model_name = f"lichess_{n_layers}layers_ckpt_no_optimizer.pt"
@@ -158,8 +162,8 @@ if LOAD_AND_CONVERT_CHECKPOINT:
 sample_input = torch.tensor([[15, 6, 4, 27, 9, 0, 25, 10, 0, 7, 4, 19]]).to(device)
 # sample_input = torch.tensor([[15, 6, 4, 27, 9]])
 # The argmax of the output (ie the most likely next move from each position)
-sample_output = torch.tensor([[6, 4, 27, 9, 0, 27, 10, 0, 7, 4, 19, 28]])
-model_output = model(sample_input).argmax(dim=-1)
+sample_output = torch.tensor([[6, 4, 27, 9, 0, 27, 10, 0, 7, 4, 19, 28]]).to(device)
+model_output = model(sample_input).argmax(dim=-1).to(device)
 print(model_output)
 print(sample_output == model_output)
 
@@ -168,3 +172,4 @@ print(sample_output == model_output)
 # But, I've never seen that happen, so I'm keeping it simple for now. For a more robust test, use the nanogpt_to_transformer_lens.ipynb notebook.
 # This notebook actually runs the sample input through the original nanogpt model, and then through the converted transformer lens model.
 assert torch.all(sample_output == model_output)
+# %

@@ -1,0 +1,81 @@
+Papers
+    Original probe paper: https://arxiv.org/pdf/2403.15498v2
+    SAE paper: https://arxiv.org/pdf/2408.00113
+
+Repos:
+    Training: https://github.com/adamkarvonen/
+    Probes: https://github.com/adamkarvonen/chess_llm_interpretability
+    SAEs: https://github.com/adamkarvonen/SAE_BoardGameEval
+
+Thoughts and observations:
+    It doesn't seem to have a robust understanding of checkmate (examples below)
+    It does know rules, even "niche" ones like castling, en passant, etc
+    In the probe paper, they find that square classification accuracy in the 16-layer model peaks at layer 12 and slightly degrades in later layers
+        They also find that player skill classification peaks in the last layer
+        Their hypothesis: board state and possible moves are computed in parallel, and then player skill is used at the end to pick which move to play
+    Also from the probe paper, they check whether it's regurgitating memorized moves by spot-checking 100 random games it plays. They find that none are in the training set beyond move 10
+        BUT it happily played ~12 moves of mainline Ruy Lopez theory with me (first PGN below), so it definitely _can_ regurgitate
+    Along the lines of memorization vs conceptual understanding, I would love to get it playing chess960: https://en.wikipedia.org/wiki/Fischer_random_chess
+        chess Python library we're relying on does contain native 960 support
+        But this would presumably be a big training endeavor
+        Maybe it could be fun to try patching in an entirely different board state, similar to the first intervention in the first paper, but for every piece? But I wouldn't expect this to work - could try to get it to play 960 from the start
+    Ambiguity resolution, e.g. Nbd2 when either knight can move to d2, could be interesting to study. It seems like it handles this perfectly, including when the disambiguating character is numeric rather than alphabetic
+    Stockfish is open source and could be a cool interp subject, but out of scope for this week. I found one Stockfish mech interp paper: https://www.ijcai.org/proceedings/2023/0541.
+        Related: mech interp on AlphaZero: https://www.pnas.org/doi/10.1073/pnas.
+        LW Leela post: https://www.lesswrong.com/posts/GfwdBoaLw3ef3zBqe/evidence-of-learned-look-ahead-in-a-chess-playing-neural
+    This line from the caption of figure 3 of the OG probe paper seems interesting: Oddly, the skill probes trained on randomized models become more accurate on deeper layers.
+
+chess Python library contains native 960 support
+
+Cole vs ChessGPT 50M 1-0
+1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 O-O 8. h3 d6 9. c3 Na5 10. Bc2 c5 11. a4 Bb7 12. d4 Qc7 13. d5 Nc4 14. Nbd2 Nxd2 15. Bxd2 c4 16. b4 cxb3 17. Bxb3 Rfc8 18. Qe2 Nd7 19. axb5 axb5 20. Qxb5 Nc5 21. Bc2 Ba6 22. Qa5 Qxa5 23. Rxa5 Bd8 24. Raa1 Bd3 25. Bxd3 Nxd3 26. Red1 Nb2 27. Rdb1 Nc4 28. Be1 Bb6 29. Rxa8 Rxa8 30. Nd2 Nxd2 31. Bxd2 Ra2 32. Be1 Bc5 33. Rb8#
+32...Bc5?? misses mate in 1. If I ask it to play white in that position, it plays 33.Kf1??
+Oh lol we both missed 32.Rxb6 
+
+
+If you give it the following position, it outputs 26.Re8+, but Re8+ is actually mate
+1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6 6. Be3 e5 7. Nb3 Be7 8. f3 O-O 9. Qd2 b5 10. O-O-O Be6 11. g4 b4 12. Nd5 Nxd5 13. exd5 Bc8 14. Qxb4 Nd7 15. h4 Qc7 16. g5 Rb8 17. Qc3 Qb7 18. h5 Nb6 19. Bxb6 Qxb6 20. g6 fxg6 21. hxg6 h6 22. Bd3 Rxf3 23. Rdf1 Rg3 24. Rf7 e4 25. Rxe7 exd3 26. Re8#
+
+ChessGPT vs Cole 0-1
+It misses mate again here. 28.Rf1 and white wins
+1.e4 c5 2.Nf3 d6 3.d4 cxd4 4.Nxd4 Nf6 5.Nc3 a6 6.Be3 e5 7.Nb3 Be7 8.f3 O-O 9.Qd2 b5 10.O-O-O Be6 11.g4 b4 12.Nd5 Nxd5 13.exd5 Bc8 14.Qxb4 Nd7 15.h4 Qc7 16.g5 Rb8 17.Qc3 Qb7 18.h5 Nb6 19.Bxb6 Qxb6 20.g6 fxg6 21.hxg6 h6 22.Bd3 Rxf3 23.Rdf1 Rg3 24.Rf7 Bf6 25.Qc7 Bg5+ 26.Kb1 Rg1+ 27.Rxg1 Qxg1+ 28.Nc1?? Qxc1#
+
+
+ChessGPT vs Cole 0-1
+Hallucinates a check (61.Rh8+) here. White is busted regardless, but Rh8 does not come with check:
+1.e4 c5 2.Nf3 d6 3.d4 cxd4 4.Nxd4 Nf6 5.Nc3 a6 6.Be3 e5 7.Nb3 Be7 8.f3 O-O 9.Qd2 b5 10.O-O-O Be6 11.g4 b4 12.Nd5 Nxd5 13.exd5 Bc8 14.Qxb4 Nd7 15.h4 Qc7 16.g5 Rb8 17.Qc3 Qb7 18.h5 Nb6 19.Bxb6 Qxb6 20.g6 fxg6 21.hxg6 h6 22.Bd3 Rxf3 23.Rdf1 Rg3 24.Rf7 Bf6 25.Qc7 Qxc7 26.Rxc7 Bb7 27.Be4 Rg4 28.Bf5 Rf4 29.Be6+ Kf8 30.Rf7+ Ke8 31.Rh2 Bg5 32.Kb1 Bc8 33.Rxf4 Bxf4 34.Rf2 Bxe6 35.dxe6 Ke7 36.Na5 Kxe6 37.Nc6 Rb6 38.Nd8+ Ke7 39.Nf7 Kf6 40.Nd8 d5 41.Nf7 Kxg6 42.Nd8 Kf6 43.Nc6 Rxc6 44.c3 g5 45.Kc2 e4 46.Kd1 Ke5 47.Ke2 h5 48.Rf1 g4 49.Rh1 Rh6 50.Rh4 Kf5 51.Kf2 Kg5 52.Rh1 h4 53.Kg2 h3+ 54.Kf2 g3+ 55.Ke2 g2 56.Rg1 Kh4 57.Kf2 h2 58.Rxg2 h1=Q 59.Rg8 Qf3+ 60.Ke1 Be3 61.Rh8 Qf2+ 62.Kd1 Qd2#
+
+
+In this 960 game, if I play from white's move 18, it thinks the white king is still on e1:
+(Note that, unlike the below examples, white's king has not moved yet)
+https://lichess.org/YruTGcIA
+1. f4 d5 2. Nc3 c6 3. e4 dxe4 4. Nxe4 Nd7 5. f5 Bb6 6. Bf2 O-O-O 7. a4 Kb8 8. a5 Bxf2 9. Qxf2 e5 10. Ra3 f6 11. Nhg3 Bf7 12. Bf3 Bd5 13. Rd1 Nf7 14. d4 exd4 15. Rxd4 Nfe5 16. Ne2 Bxe4 17. Bxe4 Nc5 18. Rxd8+ Rxd8 19. Qxc5 Qe8 20. Nf4 Ng4 21. Ne6 Rd7 22. Bxc6 bxc6 23. Qb4+ Rb7 24. Qxg4 Qd7 25. Qd4 Qd5 26. Qxd5 cxd5 27. Rb3 Rxb3 28. cxb3 Kb7 29. Nxg7 Kc6 30. Ne8 Kb5 31. Nxf6 a6 32. Nxh7 Kxa5 33. f6 Kb4 34. f7 Kxb3 35. f8=Q 1-0
+
+Another random 960 game. After 30...Kc7, every piece has moved
+It plays 31.b4 Bb7 32.Rxf8, which is not a move because the rook is already on f8
+https://lichess.org/FxtirnEN
+1. g3 Nc6 2. Bg2 f5 3. f4 d5 4. Nc3 e6 5. e3 a6 6. Nd3 g6 7. b3 b5 8. Bb2 Bb7 9. Qf2 Nd6 10. O-O Ne4 11. Nxe4 fxe4 12. Bxh8 Qxh8 13. Nc5 Bc8 14. d4 exd3 15. cxd3 Ne5 16. Rac1 Ng4 17. Qe2 h5 18. h3 Nf6 19. Qc2 Rf7 20. e4 Ra7 21. e5 Ne8 22. a4 h4 23. g4 g5 24. Qd2 gxf4 25. Rxf4 Rxf4 26. Qxf4 c6 27. Rf1 Qg7 28. Qf8 Qxf8 29. Rxf8 Re7 30. a5 Kc7 31. g5 Bd7 32. g6 Rg7 33. Rf7 Rxg6 34. Rxd7+ Kc8 35. Ra7
+
+Another random 960 game, where all pieces have moved after 28.Re1:
+Playing against itself, it plays legal moves out to mate AND annotates the mate correctly!
+https://lichess.org/7KaS3Cib
+1. e4 g6 2. d4 Bg7 3. Nf3 d6 4. Bg5 Nf6 5. Nbd2 O-O 6. Bd3 Nc6 7. O-O Bg4 8. h3 Bxf3 9. Nxf3 e5 10. c3 Re8 11. Re1 h6 12. Bh4 g5 13. Bg3 Nh5 14. Bh2 Nf4 15. Bb5 Qf6 16. d5 Ne7 17. Bxe8 Rxe8 18. Nd2 Neg6 19. Nc4 Nh4 20. Ne3 h5 21. Rf1 Bh6 22. Kh1 Kh7 23. g3 Nxh3 24. gxh4 Nxf2+ 25. Rxf2 Qxf2 26. Nf5 g4 27. Qf1 Qc2 28. Re1 Rf8 29. Qe2 Qxe2 30. Rxe2 Kg6 31. Bg1 Bf4 32. c4 b6 { Black offers draw } 33. b4 Ra8 34. Rc2 a5 35. c5 axb4 36. cxd6 cxd6 37. Nxd6 Ra3 38. Bxb6 b3 39. axb3 Rxb3 40. Nc4 Rh3+ 41. Kg1 Rxh4 42. d6 Rh3 43. d7 Bg5 44. Nxe5+ Kg7 45. d8=Q Bxd8 46. Bxd8 Re3 47. Rc4 f6 48. Nd7 Rd3 49. Bxf6+ Kh6 50. Ne5 Re3 51. Kf2 Ra3 52. Rc6 g3+ 53. Kg2 Kh7 54. Bh4 Re3 55. Bxg3 Rxe4 56. Kf3 Rd4 57. Rc7+ Kh6 58. Bf4+
+ChessGPT's version of the game, forking after 28.Re1:
+1.e4 g6 2.d4 Bg7 3.Nf3 d6 4.Bg5 Nf6 5.Nbd2 O-O 6.Bd3 Nc6 7.O-O Bg4 8.h3 Bxf3 9.Nxf3 e5 10.c3 Re8 11.Re1 h6 12.Bh4 g5 13.Bg3 Nh5 14.Bh2 Nf4 15.Bb5 Qf6 16.d5 Ne7 17.Bxe8 Rxe8 18.Nd2 Neg6 19.Nc4 Nh4 20.Ne3 h5 21.Rf1 Bh6 22.Kh1 Kh7 23.g3 Nxh3 24.gxh4 Nxf2+ 25.Rxf2 Qxf2 26.Nf5 g4 27.Qf1 Qc2 28.Re1 Qxb2 29.Nxh6 Kxh6 30.Qf6+ Kh7 31.Qxf7+ Kh6 32.Qxe8 Qxc3 33.Qe6+ Kg7 34.Rf1 Qh3 35.Rf7+ Kg8 36.Qe8#
+
+960 with all pieces moved after 23...Rfc8:
+https://lichess.org/k10al5vO
+1. g3 b6 2. e4 f5 3. d3 e5 4. Bg2 Ne6 5. O-O f4 6. b3 Qh5 7. Nd2 Ng5 8. h4 f3 9. hxg5 fxg2 10. Kxg2 Qxg5 11. Ne3 Nc6 12. Nf3 Qg6 13. Bxe5 Ba3 14. Rd1 Nxe5 15. Nxe5 Bxe4+ 16. dxe4 Qxe4+ 17. Nf3 O-O 18. Qe2 Rf7 19. Rd4 Qb7 20. Nd5 c6 21. Nf4 c5 22. Qe4 d5 23. Rxd5 Rcf8 24. c4 Re7 25. Ne5 Bb2 26. Nfd3 Bd4 27. f3 Rfe8 28. Rh1 g6 29. Re1 b5 30. Nxc5 Bxc5 31. Rxc5 Qxe4 32. Rxe4 bxc4 33. bxc4 Rb8 34. Re2 Rb1 35. 
+ChessGPT's game ends in a draw by repitition:
+1.g3 b6 2.e4 f5 3.d3 e5 4.Bg2 Ne6 5.O-O f4 6.b3 Qh5 7.Nd2 Ng5 8.h4 f3 9.hxg5 fxg2 10.Kxg2 Qxg5 11.Ne3 Nc6 12.Nf3 Qg6 13.Bxe5 Ba3 14.Rd1 Nxe5 15.Nxe5 Bxe4+ 16.dxe4 Qxe4+ 17.Nf3 O-O 18.Qe2 Rf7 19.Rd4 Qb7 20.Nd5 c6 21.Nf4 c5 22.Qe4 d5 23.Rxd5 Rcf8 24.Rd8 Rxd8 25.Qxb7 Rxb7 26.Ne6 Re8 27.Nf4 Rbe7 28.Nd5 Re2 29.Nc7 R8e7 30.Nd5 R7e6 31.Nc7 Re7 32.Nd5 R7e6 33.Nc7 Re7
+
+960 with all pieces moved after 16...Rae8:
+https://lichess.org/bayiLkFv
+1. Nf3 Nc6 2. d4 d6 3. d5 Ne5 4. e4 Nxf3 5. Bxf3 e5 6. c4 f5 7. exf5 Qxf5 8. Nc3 Nf6 9. Qb1 Bg6 10. Qxf5 Bxf5 11. Bd2 O-O 12. Re1 a6 13. Be4 Nxe4 14. Nxe4 Be7 15. O-O h6 16. f3 Rae8 17. Bc3 Bh7 18. g3 Rf7 19. Kg2 Ref8 20. b4 g5 21. h3 h5 22. g4 hxg4 23. hxg4 Bg6 24. Bd2 Bxe4 25. fxe4 Rxf1 26. Rxf1 Rxf1 27. Kxf1 Kf7 28. Ke2 Ke8 { Black offers draw } 29. Kd3 Kd7 30. Be3 b6 31. c5 Kc8 32. cxb6 cxb6 33. Bxb6 Kb7 34. Be3 Kb8 35. Kc4 Kb7 36. a4 Kb8 37. a5 Kb7 38. b5 Bd8 39. Kb4 Be7 40. Bb6 Bf6 41. bxa6+ Kxa6 42. Bc7 Be7 43. Ka4 Kb7 44. Bb6 Ka6 45. Kb4 Bf6 46. Ka4 Be7 47. Bc7 Kb7 48. Bb6 Ka6
+ChessGPT plays all legal moves, plays consecutive blunders with white in a position that's probably drawn, and then "resigns:"
+1.Nf3 Nc6 2.d4 d6 3.d5 Ne5 4.e4 Nxf3 5.Bxf3 e5 6.c4 f5 7.exf5 Qxf5 8.Nc3 Nf6 9.Qb1 Bg6 10.Qxf5 Bxf5 11.Bd2 O-O 12.Re1 a6 13.Be4 Nxe4 14.Nxe4 Be7 15.O-O h6 16.f3 Rae8 17.Be3 Bh7 18.b4 Rf7 19.c5 Ref8 20.cxd6 cxd6 21.Rc1 Bxe4 22.fxe4 Rxf1+ 23.Rxf1 Rxf1+ 24.Kxf1 Kf7 25.Ke2 Kg6 26.Kd3 Kh5 27.h3 Kh4 28.Bf2+ Kg5 29.Kc4 Kf4 30.Kd3 Bd8 31.a4 g5 32.b5 axb5 33.axb5 h5 34.Be3+ Kg3 35.Bg1 Kxg2 36.Be3 Kxh3 37.Bb6 Bxb6;1.e4
+
+
+Game where a mate is not identified
+The first checkmate appears at move 23 (identified as just a check)
+1.e4 e5 2.Nf3 Bc5 3.Bc4 Nf6 4.Nxe5 Nxe4 5.Nxf7 Qf6 6.O-O Nxf2 7.Qe2+ Kf8 8.Nxh8 Ng4+ 9.Kh1 Nf2+ 10.Kg1 d5 11.Bxd5 Nh3+ 12.Kh1 Nf2+ 13.Kg1 Nh3+ 14.Kh1 Nc6 15.Rxf6+ gxf6 16.gxh3 Bxh3 17.Qh5 Ne7 18.Qxh3 Rd8 19.Bxb7 Nd5 20.Bxd5 Rxd5 21.Qxh7 Be7 22.Ng6+ Ke8 23.Qxe7+ Kd8 24.Qxf6+ Kc8 25.Ne7+ Kb7 26.Nxd5 c6 27.Ne7 Kb6 28.Qxc6+ Ka5 29.Qc5+ Ka6 30.Nc6 Kb7 31.Na5+ Ka6 32.Nc4 Kb7 33.Nd6+ Ka6 34.Qb5#;

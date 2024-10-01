@@ -1,3 +1,5 @@
+# %%
+
 from transformer_lens import HookedTransformer, HookedTransformerConfig
 import einops
 import torch
@@ -18,6 +20,11 @@ import othello_engine_utils
 import othello_utils
 from chess_utils import PlayerColor, Config
 import argparse
+import os
+import torch.nn.utils.rnn as rnn_utils
+
+
+# %%
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +42,9 @@ if not logger.handlers:
 MODEL_DIR = "models/"
 DATA_DIR = "data/"
 PROBE_DIR = "linear_probes/"
-SAVED_PROBE_DIR = "linear_probes/saved_probes/"
+# SAVED_PROBE_DIR = "linear_probes/saved_probes/"
+# SAVED_PROBE_DIR = "linear_probes/sidprobes/"
+SAVED_PROBE_DIR = "linear_probes/10000game_cancheck/"
 WANDB_PROJECT = "chess_linear_probes"
 BATCH_SIZE = 2
 D_MODEL = 512
@@ -64,6 +73,7 @@ logger.info(encode(meta_round_trip_input))
 logger.info("Performing round trip test on meta")
 assert decode(encode(meta_round_trip_input)) == meta_round_trip_input
 
+# %%
 
 @dataclass
 class TrainingParams:
@@ -74,10 +84,10 @@ class TrainingParams:
     lr: float = 0.001
     beta1: float = 0.9
     beta2: float = 0.99
-    max_train_games: int = 10000
+    max_train_games: int = 1000
     max_test_games: int = 10000
     max_val_games: int = 1000
-    max_iters: int = 50000
+    max_iters: int = 5000
     eval_iters: int = 50
     num_epochs: int = max_iters // max_train_games
 
@@ -93,7 +103,23 @@ class SingleProbe:
     logging_dict: dict
     loss: torch.Tensor = torch.tensor(0.0)
     accuracy: torch.Tensor = torch.tensor(0.0)
+    TP: torch.Tensor = torch.tensor(0.0)
+    TN: torch.Tensor = torch.tensor(0.0)
+    FP: torch.Tensor = torch.tensor(0.0)
+    FN: torch.Tensor = torch.tensor(0.0)
     accuracy_queue: collections.deque = field(
+        default_factory=lambda: collections.deque(maxlen=1000)
+    )
+    TP_queue: collections.deque = field(
+        default_factory=lambda: collections.deque(maxlen=1000)
+    )
+    TN_queue: collections.deque = field(
+        default_factory=lambda: collections.deque(maxlen=1000)
+    )
+    FP_queue: collections.deque = field(
+        default_factory=lambda: collections.deque(maxlen=1000)
+    )
+    FN_queue: collections.deque = field(
         default_factory=lambda: collections.deque(maxlen=1000)
     )
 
@@ -103,11 +129,13 @@ class LinearProbeData:
     model: HookedTransformer
     custom_indices: torch.Tensor
     board_seqs_int: torch.Tensor
+    is_valid_mask: torch.Tensor
     board_seqs_string: list[str]
     skill_stack: torch.Tensor
     user_state_dict_one_hot_mapping: Optional[dict[int, int]] = None
 
 
+# %%
 def get_transformer_lens_model(
     model_name: str, n_layers: int, device: torch.device
 ) -> HookedTransformer:
@@ -132,6 +160,7 @@ def get_transformer_lens_model(
     return model
 
 
+# %%
 def process_dataframe(
     input_dataframe_file: str,
     config: Config,
@@ -228,17 +257,23 @@ def get_board_seqs_string(df: pd.DataFrame) -> list[str]:
         return get_othello_seqs_string(df)
 
     key = "transcript"
-    row_length = len(df[key].iloc[0])
+    # row_length = len(df[key].iloc[0])
 
-    assert all(
-        df[key].apply(lambda x: len(x) == row_length)
-    ), "Not all transcripts are of length {}".format(row_length)
+    # assert all(
+    #     df[key].apply(lambda x: len(x) == row_length)
+    # ), "Not all transcripts are of length {}".format(row_length)
 
     board_seqs_string_Bl = df[key]
 
     logger.info(
-        f"Number of games: {len(board_seqs_string_Bl)},length of a game in chars: {len(board_seqs_string_Bl[0])}"
+        f"Number of games: {len(board_seqs_string_Bl)}"#,length of a game in chars: {len(board_seqs_string_Bl[0])}"
     )
+    # n=0
+    # for seq in board_seqs_string_Bl:
+    #     if '#' in seq:
+    #         print(seq)
+    #         n+=1
+    # print(n/len(board_seqs_string_Bl))
     return board_seqs_string_Bl
 
 
@@ -257,7 +292,9 @@ def get_board_seqs_int(df: pd.DataFrame) -> Int[Tensor, "num_games pgn_str_lengt
 
     encoded_df = df["transcript"].apply(encode)
     logger.info(encoded_df.head())
-    board_seqs_int_Bl = torch.tensor(encoded_df.apply(list).tolist())
+    
+    board_seqs_int_Bl = rnn_utils.pad_sequence([torch.Tensor(toks).to(dtype=torch.int) for toks in encoded_df.apply(list).tolist()], batch_first=True, padding_value=0)
+
     logger.info(f"board_seqs_int shape: {board_seqs_int_Bl.shape}")
     return board_seqs_int_Bl
 
@@ -288,17 +325,20 @@ def prepare_data_batch(
 ) -> tuple[
     Int[Tensor, "modes batch_size num_white_moves num_rows num_cols num_options"],
     dict[int, Float[Tensor, "batch_size num_white_moves d_model"]],
+    Int[Tensor, "batch_size num_white_moves"],
 ]:
     list_of_indices = indices.tolist()  # For indexing into the board_seqs_string list of strings
     games_int_Bl = probe_data.board_seqs_int[
         indices
     ]  # games_int shape (batch_size, pgn_str_length)
+    # print(games_int_Bl.shape)
     games_str_Bl = [probe_data.board_seqs_string[idx] for idx in list_of_indices]
     games_str_Bl = [s[:] for s in games_str_Bl]
     games_dots_BL = probe_data.custom_indices[indices]
     games_dots_BL = games_dots_BL[
         :, config.pos_start : config.pos_end
     ]  # games_dots shape (batch_size, num_white_moves)
+    valid_mask_sliced = probe_data.is_valid_mask[indices, config.pos_start : config.pos_end]
 
     if config.probing_for_skill:
         games_skill_B = probe_data.skill_stack[indices]  # games_skill shape (batch_size,)
@@ -382,7 +422,7 @@ def prepare_data_batch(
             indexed_resid_posts_BLD
         )  # shape (batch_size, num_white_moves, d_model)
 
-    return state_stack_one_hot_MBLRRC, resid_post_dict_BLD
+    return state_stack_one_hot_MBLRRC, resid_post_dict_BLD, valid_mask_sliced.to(DEVICE)
 
 
 def populate_probes_dict(
@@ -435,24 +475,34 @@ def linear_probe_forward_pass(
     state_stack_one_hot_MBLRRC: Int[Tensor, "modes batch num_white_moves rows cols options"],
     resid_post_BLD: Float[Tensor, "batch num_white_moves d_model"],
     one_hot_range: int,
-) -> tuple[Tensor, Tensor]:
+    is_valid_mask_BL: Float[Tensor, "batch num_white_moves"],
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Outputs are scalar tensors."""
     probe_out_MBLRRC = einsum(
         "batch pos d_model, modes d_model rows cols options -> modes batch pos rows cols options",
         resid_post_BLD,
         linear_probe_MDRRC,
     )
+    expanded_mask = einops.rearrange(is_valid_mask_BL, "batch pos -> batch pos 1 1") # Needs to be [batch pos rows cols]
 
     assert probe_out_MBLRRC.shape == state_stack_one_hot_MBLRRC.shape
 
-    accuracy = (
-        (probe_out_MBLRRC[0].argmax(-1) == state_stack_one_hot_MBLRRC[0].argmax(-1)).float().mean()
-    )
 
+    accuracy = (
+        ((probe_out_MBLRRC[0].argmax(-1) == state_stack_one_hot_MBLRRC[0].argmax(-1)) * expanded_mask).float().mean()
+    )
+    preds = probe_out_MBLRRC[0].argmax(-1).float()
+    true_labels = state_stack_one_hot_MBLRRC[0].argmax(-1).float()
+    TP = (((preds == 1) & (true_labels == 1))*expanded_mask).sum().float()
+    FP = (((preds == 1) & (true_labels == 0))*expanded_mask).sum().float()
+    FN = (((preds == 0) & (true_labels == 1))*expanded_mask).sum().float()
+    TN = (((preds == 0) & (true_labels == 0))*expanded_mask).sum().float()
+
+    fully_expanded_mask = einops.rearrange(is_valid_mask_BL, "batch pos -> 1 batch pos 1 1 1") # Needs to be [modes batch pos rows cols options]
     probe_log_probs_MBLRRC = probe_out_MBLRRC.log_softmax(-1)
     probe_correct_log_probs_MLRR = (
         einops.reduce(
-            probe_log_probs_MBLRRC * state_stack_one_hot_MBLRRC,
+            probe_log_probs_MBLRRC * state_stack_one_hot_MBLRRC * fully_expanded_mask,
             "modes batch pos rows cols options -> modes pos rows cols",
             "mean",
         )
@@ -461,7 +511,7 @@ def linear_probe_forward_pass(
     # probe_correct_log_probs shape (modes, num_white_moves, num_rows, num_cols)
     loss = -probe_correct_log_probs_MLRR[0, :].mean(0).sum()
 
-    return loss, accuracy
+    return loss, accuracy, TP, TN, FP, FN
 
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
@@ -497,28 +547,45 @@ def estimate_loss(
     for split in split_indices:
         losses: dict[int, list[float]] = {}
         accuracies: dict[int, list[float]] = {}
+        TPs: dict[int, list[float]] = {}
+        TNs: dict[int, list[float]] = {}
+        FPs: dict[int, list[float]] = {}
+        FNs: dict[int, list[float]] = {}
         for layer in probes:
             losses[layer] = []
             accuracies[layer] = []
+            TPs[layer] = []
+            TNs[layer] = []
+            FPs[layer] = []
+            FNs[layer] = []
         for k in range(0, eval_iters, BATCH_SIZE):
             indices = split_indices[split][k : k + BATCH_SIZE]
 
-            state_stack_one_hot_MBLRRC, resid_post_dict_BLD = prepare_data_batch(
+            state_stack_one_hot_MBLRRC, resid_post_dict_BLD, valid_mask_BL = prepare_data_batch(
                 indices, probe_data, config, layers
             )
 
             for layer in probes:
-                loss, accuracy = linear_probe_forward_pass(
+                loss, accuracy, TP, TN, FP, FN = linear_probe_forward_pass(
                     probes[layer].linear_probe,
                     state_stack_one_hot_MBLRRC,
                     resid_post_dict_BLD[layer],
                     one_hot_range,
+                    valid_mask_BL,
                 )
                 losses[layer].append(loss.item())
                 accuracies[layer].append(accuracy.item())
+                TPs[layer].append(TP.item())
+                TNs[layer].append(TN.item())
+                FPs[layer].append(FP.item())
+                FNs[layer].append(FN.item())
         for layer in layers:
             out[layer][split]["loss"] = sum(losses[layer]) / len(losses[layer])
             out[layer][split]["accuracy"] = sum(accuracies[layer]) / len(accuracies[layer])
+            precision = sum(TPs[layer])/(sum(TPs[layer]) + sum(FPs[layer]) + 1e-8) # Add epsilon to avoid div by 0
+            recall = sum(TPs[layer])/(sum(TPs[layer]) + sum(FNs[layer]) + 1e-8)
+            out[layer][split]["f1_score"] = 2 * (precision * recall) / (precision + recall + 1e-8)
+            
     return out
 
 
@@ -565,17 +632,18 @@ def train_linear_probe_cross_entropy(
 
             indices_B = full_train_indices[i : i + BATCH_SIZE]  # shape batch_size
 
-            state_stack_one_hot_MBLRRC, resid_post_dict_BLD = prepare_data_batch(
+            state_stack_one_hot_MBLRRC, resid_post_dict_BLD, valid_mask_BL = prepare_data_batch(
                 indices_B, probe_data, config, layers
             )
 
             for layer in probes:
 
-                probes[layer].loss, probes[layer].accuracy = linear_probe_forward_pass(
+                probes[layer].loss, probes[layer].accuracy, probes[layer].TP, probes[layer].TN, probes[layer].FP, probes[layer].FN = linear_probe_forward_pass(
                     probes[layer].linear_probe,
                     state_stack_one_hot_MBLRRC,
                     resid_post_dict_BLD[layer],
                     one_hot_range,
+                    valid_mask_BL,
                 )
 
                 probes[layer].loss.backward()
@@ -583,6 +651,10 @@ def train_linear_probe_cross_entropy(
                 probes[layer].optimiser.zero_grad()
 
                 probes[layer].accuracy_queue.append(probes[layer].accuracy.item())
+                probes[layer].TP_queue.append(probes[layer].TP.item())
+                probes[layer].TN_queue.append(probes[layer].TN.item())
+                probes[layer].FP_queue.append(probes[layer].FP.item())
+                probes[layer].FN_queue.append(probes[layer].FN.item())
 
             if i % 100 == 0:
                 if WANDB_LOGGING:
@@ -594,8 +666,11 @@ def train_linear_probe_cross_entropy(
                     )
                 for layer in probes:
                     avg_acc = sum(probes[layer].accuracy_queue) / len(probes[layer].accuracy_queue)
+                    precision = sum(probes[layer].TP_queue)/(sum(probes[layer].TP_queue) + sum(probes[layer].FP_queue) + 1e-8) # Add epsilon to avoid div by 0
+                    recall = sum(probes[layer].TP_queue)/(sum(probes[layer].TP_queue) + sum(probes[layer].FN_queue) + 1e-8)
+                    avg_f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
                     logger.info(
-                        f"epoch {epoch}, iter {i}, layer {layer}, acc {probes[layer].accuracy:.3f}, loss {probes[layer].loss:.3f}, avg acc {avg_acc:.3f}"
+                        f"epoch {epoch}, iter {i}, layer {layer}, acc {probes[layer].accuracy:.3f}, loss {probes[layer].loss:.3f}, avg acc {avg_acc:.3f}, avg f1 {avg_f1:.3f}"
                     )
                     if WANDB_LOGGING:
                         wandb.log(
@@ -603,6 +678,7 @@ def train_linear_probe_cross_entropy(
                                 f"layer_{layer}_loss": probes[layer].loss,
                                 f"layer_{layer}_acc": probes[layer].accuracy,
                                 f"layer_{layer}_avg_acc": avg_acc,
+                                f"layer_{layer}_avg_f1": avg_f1
                             }
                         )
 
@@ -619,19 +695,22 @@ def train_linear_probe_cross_entropy(
                 )
                 for layer in probes:
                     logger.info(
-                        f"epoch {epoch}, layer {layer}, train loss: {losses[layer]['train']['loss']:.3f}, val loss: {losses[layer]['val']['loss']:.3f}, train acc: {losses[layer]['train']['accuracy']:.3f}, val acc: {losses[layer]['val']['accuracy']:.3f}"
+                        f"epoch {epoch}, layer {layer}, train loss: {losses[layer]['train']['loss']:.3f}, val loss: {losses[layer]['val']['loss']:.3f}, train acc: {losses[layer]['train']['accuracy']:.3f}, val acc: {losses[layer]['val']['accuracy']:.3f}, train f1: {losses[layer]['train']['f1_score']:.3f}, val f1: {losses[layer]['val']['f1_score']:.3f}"
                     )
                     if WANDB_LOGGING:
                         wandb.log(
                             {
                                 f"layer_{layer}_train_loss": losses[layer]["train"]["loss"],
                                 f"layer_{layer}_train_acc": losses[layer]["train"]["accuracy"],
+                                f"layer_{layer}_train_acc": losses[layer]["train"]["f1_score"],
                                 f"layer_{layer}_val_loss": losses[layer]["val"]["loss"],
                                 f"layer_{layer}_val_acc": losses[layer]["val"]["accuracy"],
+                                f"layer_{layer}_val_acc": losses[layer]["val"]["f1_score"],
                             }
                         )
             current_iter += BATCH_SIZE
     final_accs = {}
+    final_f1s = {}
     for layer in probes:
         checkpoint = {
             "linear_probe": probes[layer].linear_probe,
@@ -644,8 +723,11 @@ def train_linear_probe_cross_entropy(
         checkpoint.update(probes[layer].logging_dict)
         torch.save(checkpoint, probes[layer].probe_name)
         final_accs[layer] = sum(probes[layer].accuracy_queue) / len(probes[layer].accuracy_queue)
-        logger.info(f"layer {layer}, final acc: {final_accs[layer]}")
-    return final_accs
+        precision = sum(probes[layer].TP_queue)/(sum(probes[layer].TP_queue) + sum(probes[layer].FP_queue) + 1e-8) # Add epsilon to avoid div by 0
+        recall = sum(probes[layer].TP_queue)/(sum(probes[layer].TP_queue) + sum(probes[layer].FN_queue) + 1e-8)
+        final_f1s[layer] = 2 * (precision * recall) / (precision + recall + 1e-8)
+        logger.info(f"layer {layer}, final acc: {final_accs[layer]}, final f1: {final_f1s[layer]}")
+    return final_accs, final_f1s
 
 
 def construct_linear_probe_data(
@@ -671,18 +753,26 @@ def construct_linear_probe_data(
     user_state_dict_one_hot_mapping, df = process_dataframe(input_dataframe_file, config)
     df = df[:max_games]
     board_seqs_string_Bl = get_board_seqs_string(df)
-    board_seqs_int_Bl = get_board_seqs_int(df)
     skill_stack_B = None
     if config.probing_for_skill:
         skill_stack_B = get_skill_stack(config, df)
-    custom_indices = chess_utils.find_custom_indices(
+    custom_indices, is_valid_mask_BL = chess_utils.find_custom_indices(
         config.custom_indexing_function, board_seqs_string_Bl
     )
 
-    pgn_str_length = len(board_seqs_string_Bl[0])
+    # pgn_str_length = len(board_seqs_string_Bl[0])
+    maxpgn_str_length = max([len(board_seqs_string_Bl[i]) for i in range(len(board_seqs_string_Bl))])
     num_games = len(board_seqs_string_Bl)
 
-    assert board_seqs_int_Bl.shape == (num_games, pgn_str_length)
+    board_seqs_int_Bl = get_board_seqs_int(df)
+    assert board_seqs_int_Bl.shape == (num_games, maxpgn_str_length)
+    # print(is_valid_mask_BL[0])
+    # print(len(board_seqs_string_Bl[0]))
+    # print(board_seqs_string_Bl[0])
+    # print(len(board_seqs_int_Bl[0]))
+    # print(board_seqs_int_Bl[0])
+    # assert False
+    # assert(board_seqs_int_Bl[is_valid_mask_BL].sum().item() == 0)
 
     if skill_stack_B is not None:
         assert skill_stack_B.shape == (num_games,)
@@ -690,13 +780,14 @@ def construct_linear_probe_data(
     _, shortest_game_length_in_moves = custom_indices.shape
     assert custom_indices.shape == (num_games, shortest_game_length_in_moves)
 
-    if not config.pos_end:
-        config.pos_end = shortest_game_length_in_moves
+    # if not config.pos_end:
+    #     config.pos_end = shortest_game_length_in_moves
 
     probe_data = LinearProbeData(
         model=model,
         custom_indices=custom_indices,
         board_seqs_int=board_seqs_int_Bl,
+        is_valid_mask=is_valid_mask_BL,
         board_seqs_string=board_seqs_string_Bl,
         skill_stack=skill_stack_B,
         user_state_dict_one_hot_mapping=user_state_dict_one_hot_mapping,
@@ -745,23 +836,34 @@ def test_linear_probe_cross_entropy(
 
     current_iter = 0
     accuracy_list = []
+    TP_list = []
+    TN_list = []
+    FP_list = []
+    FN_list = []
     loss_list = []
     full_test_indices = torch.arange(0, num_games)
     for i in tqdm(range(0, num_games, BATCH_SIZE)):
         indices_B = full_test_indices[i : i + BATCH_SIZE]  # shape batch_size
 
-        state_stack_one_hot_MBLRRC, resid_post_dict_BLD = prepare_data_batch(
+        state_stack_one_hot_MBLRRC, resid_post_dict_BLD, valid_mask_BL = prepare_data_batch(
             indices_B, probe_data, config, [layer]
         )
-
-        loss, accuracy = linear_probe_forward_pass(
+        loss, accuracy, TP, TN, FP, FN  = linear_probe_forward_pass(
             linear_probe_MDRRC,
             state_stack_one_hot_MBLRRC,
             resid_post_dict_BLD[layer],
             one_hot_range,
+            valid_mask_BL,
         )
 
         accuracy_list.append(accuracy.item())
+        TP_list.append(TP.item())
+        TN_list.append(TN.item())
+        FP_list.append(FP.item())
+        FN_list.append(FN.item())
+        # precision = TP.item()/(TP.item() + FP.item() + 1e-8) # Add epsilon to avoid div by 0
+        # recall = TP.item()/(TP.item() + FN.item() + 1e-8)
+        # f1_score_list.append(2 * (precision * recall) / (precision + recall + 1e-8))
         loss_list.append(loss.item())
 
         if i % 100 == 0:
@@ -773,6 +875,10 @@ def test_linear_probe_cross_entropy(
         current_iter += BATCH_SIZE
     data = {
         "accuracy": accuracy_list,
+        "TP": TP_list,
+        "TN": TN_list,
+        "FP": FP_list,
+        "FN": FN_list,
         "loss": loss_list,
     }
 
@@ -781,7 +887,11 @@ def test_linear_probe_cross_entropy(
 
     logger.info(f"Saving test data to {output_location}")
     average_accuracy = sum(accuracy_list) / len(accuracy_list)
+    precision = sum(TP_list)/(sum(TP_list) + sum(FP_list) + 1e-8) # Add epsilon to avoid div by 0
+    recall = sum(TP_list)/(sum(TP_list) + sum(FN_list) + 1e-8)
+    average_f1_score = 2 * (precision * recall) / (precision + recall + 1e-8)
     logger.info(f"Average accuracy: {average_accuracy}")
+    logger.info(f"Average f1: {average_f1_score}")
 
     with open(output_location, "wb") as f:
         pickle.dump(data, f)
@@ -803,7 +913,7 @@ def parse_arguments():
     parser.add_argument(
         "--probe",
         type=str,
-        choices=["piece", "skill"],
+        choices=["piece", "skill", "cancheckmate", "randi", "cancheck"],
         default="piece",
         help='Type of probe to use: "piece" for piece board state or "skill" for player skill level.',
     )
@@ -821,12 +931,21 @@ if __name__ == "__main__":
     args = parse_arguments()
     WANDB_LOGGING = args.wandb_logging
     if args.mode == "test":
+        saved_probes = [
+            file
+            for file in os.listdir(SAVED_PROBE_DIR)
+            if (os.path.isfile(os.path.join(SAVED_PROBE_DIR, file)) and (("layer_7" in file) or ("layer_6" in file)))
+        ]
         # saved_probes = [
-        #     file
-        #     for file in os.listdir(SAVED_PROBE_DIR)
-        #     if os.path.isfile(os.path.join(SAVED_PROBE_DIR, file))
+        #     "tf_lens_lichess_8layers_ckpt_no_optimizer_chess_skill_probe_layer_0.pth",
+        #     "tf_lens_lichess_8layers_ckpt_no_optimizer_chess_skill_probe_layer_1.pth",
+        #     "tf_lens_lichess_8layers_ckpt_no_optimizer_chess_skill_probe_layer_2.pth",
+        #     "tf_lens_lichess_8layers_ckpt_no_optimizer_chess_skill_probe_layer_3.pth",
+        #     "tf_lens_lichess_8layers_ckpt_no_optimizer_chess_skill_probe_layer_4.pth",
+        #     "tf_lens_lichess_8layers_ckpt_no_optimizer_chess_skill_probe_layer_5.pth",
+        #     "tf_lens_lichess_8layers_ckpt_no_optimizer_chess_skill_probe_layer_6.pth",
+        #     "tf_lens_lichess_8layers_ckpt_no_optimizer_chess_skill_probe_layer_7.pth",
         # ]
-        saved_probes = []
 
         # Quick and janky way to select between piece and skill probes
         if args.probe == "piece":
@@ -891,9 +1010,18 @@ if __name__ == "__main__":
                     probe_file_location, probe_data, config, logging_dict, TRAIN_PARAMS
                 )
     elif args.mode == "train":
-        config = chess_utils.piece_config
-        if args.probe == "skill":
+        if args.probe == "piece":
+            config = chess_utils.piece_config
+        elif args.probe == "skill":
             config = chess_utils.skill_config
+        elif args.probe == "cancheckmate":
+            config = chess_utils.can_checkmate_config
+        elif args.probe == "cancheck":
+            config = chess_utils.can_check_config
+        elif args.probe == "randi":
+            config = chess_utils.randi_probe_config
+        else:
+            raise NotImplementedError
 
         othello = False
 
@@ -945,3 +1073,5 @@ if __name__ == "__main__":
         )
 
         train_linear_probe_cross_entropy(probes, probe_data, config, TRAIN_PARAMS)
+
+# %%
