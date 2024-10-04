@@ -9,6 +9,7 @@ from torch import Tensor
 from enum import Enum
 import othello_utils
 import numpy as np
+import torch.nn.utils.rnn as rnn_utils
 
 DEFAULT_DTYPE = torch.int8
 
@@ -243,17 +244,6 @@ def board_to_last_self_move_state(board: chess.Board, skill: Optional[int] = Non
 
     return state_RR
 
-
-def board_to_is_in_check(board: chess.Board, skill: Optional[int] = None) -> torch.Tensor:
-    """Given a chess board object, return a 1x1 torch.Tensor.
-    The 1x1 array indicates whether the current player can check in the next move (1 = yes, 0 = no).
-    """
-    # state = torch.zeros((1, 1), dtype=DEFAULT_DTYPE)
-    if board.is_checkmate() or board.is_check():
-        return torch.ones((1, 1), dtype=DEFAULT_DTYPE)
-    else:
-        return torch.zeros((1, 1), dtype=DEFAULT_DTYPE)
-
 def board_to_can_checkmate_next(board: chess.Board, skill: Optional[int] = None) -> torch.Tensor:
     """Given a chess board object, return a 1x1 torch.Tensor.
     The 1x1 array indicates whether the current player can checkmate in the next move (1 = yes, 0 = no).
@@ -282,44 +272,38 @@ def board_to_can_check_next(board: chess.Board, skill: Optional[int] = None) -> 
         board.pop()
     return state
 
-def board_to_can_capture_queen_next(board: chess.Board, skill: Optional[int] = None) -> torch.Tensor:
+def board_to_is_in_check_or_mate(board: chess.Board, skill: Optional[int] = None) -> torch.Tensor:
     """Given a chess board object, return a 1x1 torch.Tensor.
-    The 1x1 array indicates whether the current player can capture a queen in the next move (1 = yes, 0 = no).
+    The 1x1 array indicates whether the current player can check in the next move (1 = yes, 0 = no).
     """
-    state = torch.zeros((1, 1), dtype=DEFAULT_DTYPE)
-    for move in board.legal_moves:
-        if board.piece_at(move.to_square) is not None and (board.piece_at(move.to_square).symbol() == "q" or board.piece_at(move.to_square).symbol() == "Q"):
-            state[0][0] = 1
-            break
-    return state
+    # state = torch.zeros((1, 1), dtype=DEFAULT_DTYPE)
+    if board.is_checkmate():
+        return torch.ones((1, 1), dtype=DEFAULT_DTYPE)*2
+    elif board.is_check():
+        return torch.ones((1, 1), dtype=DEFAULT_DTYPE)*1
+    else:
+        return torch.zeros((1, 1), dtype=DEFAULT_DTYPE)
 
-def board_to_can_en_passant_next(board: chess.Board, skill: Optional[int] = None) -> torch.Tensor:
+def board_to_is_in_mate(board: chess.Board, skill: Optional[int] = None) -> torch.Tensor:
     """Given a chess board object, return a 1x1 torch.Tensor.
-    The 1x1 array indicates whether the current player can capture en passant in the next move (1 = yes, 0 = no).
+    The 1x1 array indicates whether the current player can check in the next move (1 = yes, 0 = no).
     """
-    state = torch.zeros((1, 1), dtype=DEFAULT_DTYPE)
-    if board.has_legal_en_passant():
-        state[0][0] = 1
-    return state
+    # state = torch.zeros((1, 1), dtype=DEFAULT_DTYPE)
+    if board.is_checkmate():
+        return torch.ones((1, 1), dtype=DEFAULT_DTYPE)
+    else:
+        return torch.zeros((1, 1), dtype=DEFAULT_DTYPE)
 
-def board_to_can_move_ambiguously(board: chess.Board, skill: Optional[int] = None) -> torch.Tensor:
+def board_to_is_in_check(board: chess.Board, skill: Optional[int] = None) -> torch.Tensor:
     """Given a chess board object, return a 1x1 torch.Tensor.
-    The 1x1 array indicates whether the current player can make an ambiguous move in the next move (1 = yes, 0 = no).
+    The 1x1 array indicates whether the current player can check in the next move (1 = yes, 0 = no).
     """
-    state = torch.zeros((1, 1), dtype=DEFAULT_DTYPE)
-    moves_dict = {}
-    for move in board.legal_moves:
-        moving_piece = board.piece_at(move.from_square).symbol()
-        if moving_piece.upper() == "K" or moving_piece.upper() == "P":
-            continue
-        if moves_dict.get(moving_piece, {}).get(move.to_square, False):
-            state[0][0] = 1
-            break
-        if not (moving_piece in moves_dict.keys()):
-            moves_dict[moving_piece] = {}
-        moves_dict[moving_piece][move.to_square] = True
-    return state
-    
+    # state = torch.zeros((1, 1), dtype=DEFAULT_DTYPE)
+    if board.is_checkmate() or board.is_check():
+        return torch.ones((1, 1), dtype=DEFAULT_DTYPE)
+    else:
+        return torch.zeros((1, 1), dtype=DEFAULT_DTYPE)
+
 
 def board_to_randi(board: chess.Board, skill: Optional[int] = None) -> torch.Tensor:
     """Given a chess board object, return a 1x1 torch.Tensor.
@@ -342,11 +326,11 @@ def state_stack_to_chess_board(state_RR: torch.Tensor) -> chess.Board:
     return board
 
 
-def pgn_string_to_board(pgn_string: str, fen: Optional[str] = chess.STARTING_FEN, chess960: Optional[bool] = False) -> chess.Board:
+def pgn_string_to_board(pgn_string: str) -> chess.Board:
     """Convert a PGN string to a chess.Board object.
     We are making an assumption that the PGN string is in this format:
     ;1.e4 e5 2. or ;1.e4 e5 2.Nf3"""
-    board = chess.Board(fen, chess960=chess960)
+    board = chess.Board()
     for move in pgn_string.split():
         if "." in move:
             move = move.split(".")[1]
@@ -362,46 +346,116 @@ def create_state_stack(
     skill: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Given a string of PGN format moves, create an 8x8 torch.Tensor for every character in the string."""
+    if 0: # Cole's fine craftsmanship
+        board = chess.Board()
+        initial_states_lRR = []
+        count = 1
 
-    board = chess.Board()
-    initial_states_lRR = []
-    count = 1
+        # Scan 1: Creates states, with length = number of moves in the game
+        initial_states_lRR.append(custom_board_to_state_fn(board, skill).to(dtype=torch.int8))
+        # Apply each move to the board
+        for move in moves_string.split():
+            try:
+                count += 1
+                # Skip move numbers
+                if "." in move:
+                    board.push_san(move.split(".")[1])
+                else:
+                    board.push_san(move)
 
-    # Scan 1: Creates states, with length = number of moves in the game
-    initial_states_lRR.append(custom_board_to_state_fn(board, skill).to(dtype=torch.int8))
-    # Apply each move to the board
-    for move in moves_string.split():
-        try:
-            count += 1
-            # Skip move numbers
-            if "." in move:
-                board.push_san(move.split(".")[1])
-            else:
-                board.push_san(move)
+                initial_states_lRR.append(custom_board_to_state_fn(board, skill).to(dtype=torch.int8))
+            except:
+                # because all games are truncated to len 680, often the last move is partial and invalid
+                # so we don't need to log this, as it will happen on most games
+                break
 
-            initial_states_lRR.append(custom_board_to_state_fn(board, skill).to(dtype=torch.int8))
-        except:
-            # because all games are truncated to len 680, often the last move is partial and invalid
-            # so we don't need to log this, as it will happen on most games
-            break
+        # if count % 100 == 0:
+        #     pretty_print_state_stack(state)
+        #     print("_" * 50)
+        #     print(board)
 
-    # if count % 100 == 0:
-    #     pretty_print_state_stack(state)
-    #     print("_" * 50)
-    #     print(board)
-
-    # Second Scan: Expand states to match the length of moves_string
-    # For ;1.e4 e5 2.Nf3, ";1.e4" = idx 0, " e5" = idx 1, " 2.Nf3" = idx 2
-    expanded_states_lRR = []
-    move_index = 0
-    for char in moves_string:
-        if char == " ":
-            move_index += 1
+        # Second Scan: Expand states to match the length of moves_string
+        # For ;1.e4 e5 2.Nf3, ";1.e4" = idx 0, " e5" = idx 1, " 2.Nf3" = idx 2
+        expanded_states_lRR = []
+        move_index = 0
+        # for char in moves_string:
+        for i in range(len(moves_string) - 1):
+            if not moves_string[i] == "." and (moves_string[i] == "+" or moves_string[i] == "#" or moves_string[i + 1] == " "):
+                move_index += 1
+            expanded_states_lRR.append(initial_states_lRR[min(move_index, len(initial_states_lRR) - 1)])
         expanded_states_lRR.append(initial_states_lRR[min(move_index, len(initial_states_lRR) - 1)])
 
-    # expanded_states.append(initial_states[-1]) # The last element in expanded_states is the final position of the board.
-    # Currently not using this as len(expanded_states) would be 1 greater than len(moves_string) and that would be confusing.
-    return torch.stack(expanded_states_lRR)
+        # expanded_states.append(initial_states[-1]) # The last element in expanded_states is the final position of the board.
+        # Currently not using this as len(expanded_states) would be 1 greater than len(moves_string) and that would be confusing.
+        return torch.stack(expanded_states_lRR)
+    elif 1: # Sid's gonna fix it
+        board = chess.Board()
+        initial_states_lRR = []
+        str_so_far = ''
+        current_move = ''
+
+        initial_states_lRR.append(custom_board_to_state_fn(board, skill).to(dtype=torch.int8))
+        # Apply each move to the board
+        for char_n, char in enumerate(moves_string):
+            str_so_far += char
+            if (char != '.') and (char != '+') and (char != '#') and (char != ' '):
+                current_move += char
+            elif (char == '.'):
+                current_move = ''
+            elif (char == '+'):
+                pass
+            elif (char == '#'):
+                pass
+            elif (char == ' '):
+                current_move = ''
+            try:
+                board.push_san(current_move)
+                current_move = ''
+            except:
+                pass
+            initial_states_lRR.append(custom_board_to_state_fn(board, skill).to(dtype=torch.int8))
+        return torch.stack(initial_states_lRR)
+    else: # The OG
+        board = chess.Board()
+        initial_states_lRR = []
+        count = 1
+
+        # Scan 1: Creates states, with length = number of moves in the game
+        initial_states_lRR.append(custom_board_to_state_fn(board, skill).to(dtype=torch.int8))
+        # Apply each move to the board
+        for move in moves_string.split():
+            try:
+                count += 1
+                # Skip move numbers
+                if "." in move:
+                    board.push_san(move.split(".")[1])
+                else:
+                    board.push_san(move)
+
+                initial_states_lRR.append(custom_board_to_state_fn(board, skill).to(dtype=torch.int8))
+            except:
+                # because all games are truncated to len 680, often the last move is partial and invalid
+                # so we don't need to log this, as it will happen on most games
+                break
+
+        # if count % 100 == 0:
+        #     pretty_print_state_stack(state)
+        #     print("_" * 50)
+        #     print(board)
+
+        # Second Scan: Expand states to match the length of moves_string
+        # For ;1.e4 e5 2.Nf3, ";1.e4" = idx 0, " e5" = idx 1, " 2.Nf3" = idx 2
+        expanded_states_lRR = []
+        move_index = 0
+        for char in moves_string:
+            if char == " ":
+                move_index += 1
+            expanded_states_lRR.append(initial_states_lRR[min(move_index, len(initial_states_lRR) - 1)])
+
+        # expanded_states.append(initial_states[-1]) # The last element in expanded_states is the final position of the board.
+        # Currently not using this as len(expanded_states) would be 1 greater than len(moves_string) and that would be confusing.
+        return torch.stack(expanded_states_lRR)
+    
 
 
 def create_state_stacks(
@@ -423,7 +477,7 @@ def create_state_stacks(
         state_stacks_BlRR.append(state_stack_lRR)
 
     # Convert the list of tensors to a single tensor
-    final_state_stack_BlRR = torch.stack(state_stacks_BlRR)
+    final_state_stack_BlRR = rnn_utils.pad_sequence(state_stacks_BlRR, batch_first=True, padding_value=0)
     final_state_stack_MBlRR = final_state_stack_BlRR.unsqueeze(0)  # Add a dimension for the modes
     # Currently, there is just one mode and it isn't necessary. For now, I'm maintaining the dimension for future use.
     return final_state_stack_MBlRR
@@ -492,6 +546,7 @@ def find_dots_indices(moves_string: str) -> list[int]:
     indices = [index for index, char in enumerate(moves_string) if char == "."]
     return indices
 
+
 def find_end_of_black_moves_without_checkormate_symbs(moves_string: str) -> list[int]:
     """Returns a list of ints of indices of the end of every black move, 
     but BEFORE a '#' or '+' if the black checks or checkmates the white.
@@ -518,6 +573,43 @@ def find_end_of_black_moves_without_checkormate_symbs(moves_string: str) -> list
     # Check if black won with a checkmate:
     if (moves_string[-1] == '#') and (moves_string.strip().rfind(' ') > moves_string.strip().rfind('.')):
         indices.append(len(moves_string)-1) # Think it doesn't matter if we return the index before or after here (unclear)
+    # return [index+1 for index in indices]
+    return indices
+
+
+
+def find_nth(haystack: str, needle: str, n: int) -> int: # https://stackoverflow.com/questions/1883980/find-the-nth-occurrence-of-substring-in-a-string
+    start = haystack.find(needle)
+    while start >= 0 and n > 1:
+        start = haystack.find(needle, start+len(needle))
+        n -= 1
+    return start
+
+def find_50pct_indices_for_checkmate(moves_string: str) -> list[int]:
+    """Returns a list of ints of indices. Roughly half of these should be 
+    just before checkmate, and the other half random positions. Note, 
+    this will often return an empty list. This is designed for the black 
+    piece's moves.
+    """
+    indices = []
+    if ('#' in moves_string):
+        if moves_string[:moves_string.find('#')].rfind(' ') > moves_string[:moves_string.find('#')].rfind('.'):
+            # print("WOOOOOP")
+            # White was the last move before the checkmate, so we want to consider the board state before black's 
+            # last move and see if it can determine that it can checkmate
+            indices.append(moves_string[:moves_string.find('#')].rfind(' '))
+            # Throw in another state before a randomly chosen black piece's turn this game
+            # This might be the worst line of code I've ever written. Also it might fail if things are too short etc.
+            indices.append(moves_string[:moves_string[:moves_string[:np.random.randint(low=1,high=moves_string.rfind("."))].rfind(".")].rfind(" ")].rfind(" "))
+            indices.append(moves_string[:moves_string[:moves_string[:np.random.randint(low=1,high=moves_string.rfind("."))].rfind(".")].rfind(" ")].rfind(" "))
+            indices.append(moves_string[:moves_string[:moves_string[:np.random.randint(low=1,high=moves_string.rfind("."))].rfind(".")].rfind(" ")].rfind(" "))
+            indices.append(moves_string[:moves_string[:moves_string[:np.random.randint(low=1,high=moves_string.rfind("."))].rfind(".")].rfind(" ")].rfind(" "))
+        else:
+            pass # Ignore white piece's checkmates in this function
+    elif (np.random.randint(low=0,high=200)<1): # 1/3 of the time
+        # Append a random board state from before the black piece's turn
+        indices.append(moves_string[:moves_string[:moves_string[:np.random.randint(low=moves_string.find(".")+1,high=moves_string.rfind("."))].rfind(".")].rfind(" ")].rfind(" "))
+    # print(len(indices))
     return indices
 
 def find_spaces_indices(moves_string: str) -> list[int]:
@@ -628,23 +720,26 @@ def find_odd_indices_offset_one(moves_string: str) -> list[int]:
     return incremented_indices
 
 
+def find_custom_indices(custom_indexing_fn: Callable, games_strs_Bl: list) -> list[torch.Tensor, torch.Tensor]:
 
-def find_custom_indices(custom_indexing_fn: Callable, games_strs_Bl: list) -> torch.Tensor:
-
-    shortest_length = 1e6
+    # shortest_length = 1e6
+    longest_length = 0
     custom_indices = []
     for pgn in games_strs_Bl:
-        indices = custom_indexing_fn(pgn)
-        shortest_length = min(shortest_length, len(indices))
+        indices = custom_indexing_fn(pgn)# + [-1] # TODO check if this is legit: also take at the very end of the game
+        longest_length = max(longest_length, len(indices))
         custom_indices.append(indices)
-    print("Shortest length:", shortest_length)
+    print("Longest length:", longest_length)
 
+    padding_mask = torch.ones((len(custom_indices), longest_length), dtype=torch.bool)
+    # padding_lengths = torch.zeros(len(custom_indices), dtype=torch.int)
     for i, indices in enumerate(custom_indices):
-        custom_indices[i] = indices[:shortest_length]
+        padding_mask[i, len(indices):] = 0
+        custom_indices[i] = indices + [0]*(longest_length-len(indices))
 
     indices = torch.tensor(custom_indices, dtype=torch.int)
 
-    return indices
+    return indices, padding_mask
 
 
 def encode_string(meta: dict, s: str) -> list[int]:
@@ -684,7 +779,6 @@ def get_model_move(
     max_new_tokens: int = 7,
     temperature=1.0,
     block_size=1023,
-    fwd_hooks=[],
 ):
     """Generate new tokens from a trained language model. If temperature is 0.0, greedy decoding is used.
     Otherwise, standard temperature based sampling is used."""
@@ -703,17 +797,11 @@ def get_model_move(
                 # model(idx_cond) is a tensor of shape (batch_size, sequence_length, vocab_size)
                 # logits is a tensor of shape (batch_size, vocab_size)
                 # idx_next is a tensor of shape (batch_size, 1)
-                if len(fwd_hooks)>0:
-                    logits = model.run_with_hooks(idx_cond, fwd_hooks=fwd_hooks)[:, -1, :]
-                else:
-                    logits = model(idx_cond)[:, -1, :]
+                logits = model(idx_cond)[:, -1, :]
                 idx_next = torch.argmax(logits, dim=-1).unsqueeze(-1)
             else:
                 # forward the model to get the logits for the index in the sequence
-                if len(fwd_hooks)>0:
-                    logits = model.run_with_hooks(idx_cond, fwd_hooks=fwd_hooks)[:, -1, :]
-                else:
-                    logits = model(idx_cond)
+                logits = model(idx_cond)
                 # pluck the logits at the final step and scale by desired temperature
                 logits = logits[:, -1, :] / temperature
                 # apply softmax to convert logits to (normalized) probabilities
@@ -753,6 +841,7 @@ class Config:
     pos_end: Optional[int] = None
     player_color: PlayerColor = PlayerColor.WHITE
     othello: bool = False
+    class_weights_for_loss: Optional[list[float]] = None
 
 
 is_check_config = Config(
@@ -762,7 +851,31 @@ is_check_config = Config(
     linear_probe_name="chess_is_check_probe",
     num_rows=1,
     num_cols=1,
-    pos_start=15,
+    pos_start=20,
+    # class_weights_for_loss=[1.,100.]
+    custom_indexing_function=find_end_of_black_moves_without_checkormate_symbs
+)
+
+is_check_or_mate_config = Config(
+    min_val=0,
+    max_val=2,
+    custom_board_state_function=board_to_is_in_check_or_mate,
+    linear_probe_name="chess_is_check_or_mate_probe",
+    num_rows=1,
+    num_cols=1,
+    # pos_start=30,
+    # class_weights_for_loss=[1.,100.]
+    custom_indexing_function=find_end_of_black_moves_without_checkormate_symbs
+)
+
+is_mate_config = Config(
+    min_val=0,
+    max_val=1,
+    custom_board_state_function=board_to_is_in_mate,
+    linear_probe_name="chess_is_mate_probe",
+    num_rows=1,
+    num_cols=1,
+    pos_start=20,
     # class_weights_for_loss=[1.,100.]
     custom_indexing_function=find_end_of_black_moves_without_checkormate_symbs
 )
@@ -774,7 +887,9 @@ can_checkmate_config = Config(
     linear_probe_name="chess_can_checkmate_probe",
     num_rows=1,
     num_cols=1,
-    pos_start=25,
+    # pos_start=30,
+    # class_weights_for_loss=[1.,100.]
+    # custom_indexing_function=find_50pct_indices_for_checkmate
 )
 
 can_check_config = Config(
@@ -785,36 +900,6 @@ can_check_config = Config(
     num_rows=1,
     num_cols=1,
     # pos_start=15,
-)
-
-can_capture_queen = Config(
-    min_val=0,
-    max_val=1,
-    custom_board_state_function=board_to_can_capture_queen_next,
-    linear_probe_name="chess_can_capture_queen_probe",
-    num_rows=1,
-    num_cols=1,
-    # pos_start=15,
-)
-
-can_en_passant_config = Config(
-    min_val=0,
-    max_val=1,
-    custom_board_state_function=board_to_can_en_passant_next,
-    linear_probe_name="chess_can_en_passant_probe",
-    num_rows=1,
-    num_cols=1,
-    # pos_start=25,
-)
-
-can_move_ambiguously_config = Config(
-    min_val=0,
-    max_val=1,
-    custom_board_state_function=board_to_can_move_ambiguously,
-    linear_probe_name="chess_can_move_ambiguously_probe",
-    num_rows=1,
-    num_cols=1,
-    # pos_start=25,
 )
 
 randi_probe_config = Config(
@@ -935,10 +1020,10 @@ def update_config_using_player_color(
     """Player color will determine which indexing function we use. In addition, we set player to white by default.
     If player is black, then we update the probe name as well."""
 
-    if custom_function:
-        config.custom_indexing_function = custom_function
-        config.player_color = player_color
-        return config
+    # if custom_function:
+    #     config.custom_indexing_function = custom_function
+    #     config.player_color = player_color
+    #     return config
 
     if player_color == PlayerColor.WHITE:
         config.custom_indexing_function = find_dots_indices

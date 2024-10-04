@@ -24,6 +24,7 @@ Thoughts and observations:
         Related: mech interp on AlphaZero: https://www.pnas.org/doi/10.1073/pnas.
         LW Leela post: https://www.lesswrong.com/posts/GfwdBoaLw3ef3zBqe/evidence-of-learned-look-ahead-in-a-chess-playing-neural
     This line from the caption of figure 3 of the OG probe paper seems interesting: Oddly, the skill probes trained on randomized models become more accurate on deeper layers.
+    Vocab: should it be all of the moves?
 
 chess Python library contains native 960 support
 
@@ -79,3 +80,15 @@ ChessGPT plays all legal moves, plays consecutive blunders with white in a posit
 Game where a mate is not identified
 The first checkmate appears at move 23 (identified as just a check)
 1.e4 e5 2.Nf3 Bc5 3.Bc4 Nf6 4.Nxe5 Nxe4 5.Nxf7 Qf6 6.O-O Nxf2 7.Qe2+ Kf8 8.Nxh8 Ng4+ 9.Kh1 Nf2+ 10.Kg1 d5 11.Bxd5 Nh3+ 12.Kh1 Nf2+ 13.Kg1 Nh3+ 14.Kh1 Nc6 15.Rxf6+ gxf6 16.gxh3 Bxh3 17.Qh5 Ne7 18.Qxh3 Rd8 19.Bxb7 Nd5 20.Bxd5 Rxd5 21.Qxh7 Be7 22.Ng6+ Ke8 23.Qxe7+ Kd8 24.Qxf6+ Kc8 25.Ne7+ Kb7 26.Nxd5 c6 27.Ne7 Kb6 28.Qxc6+ Ka5 29.Qc5+ Ka6 30.Nc6 Kb7 31.Na5+ Ka6 32.Nc4 Kb7 33.Nd6+ Ka6 34.Qb5#;
+
+
+
+
+
+
+Sid ideas
+    - Look for the linear probes directions corresponding to b2, b3, ... pawns on (or before) the first move, see if it has reverse engineered the starting board state
+    - Given a 960 game, see if we can delete the info about the original starting state, add the info about the new starting state, and then see if it'll play legal moves (pending seeing if it can do this after all pieces have been moved)
+    - Look to see if we can find eg. a circuit for 'A sacrificed piece1, B takes piece1 with piece2, A takes piece2 with piece3'
+    - Tracing back where the feature direction for a particular piece probe for a particular square came from, and seeing if it all comes from previous move etc. Like DLA, but for the piece-square probe
+    - Look to see if we can understand/interpret the attention patterns for different lengths (in terms of tokens) of moves

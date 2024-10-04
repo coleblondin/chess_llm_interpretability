@@ -27,7 +27,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL_DIR = "models/"
 
 n_heads = 8
-n_layers = 16
+n_layers = 8
 d_model = 512
 
 model_name = f"lichess_{n_layers}layers_ckpt_no_optimizer.pt"

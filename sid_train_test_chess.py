@@ -15,28 +15,16 @@ from torch import Tensor
 from beartype import beartype
 import collections
 
-import chess_utils
+import sid_chess_utils
 import othello_engine_utils
 import othello_utils
-from chess_utils import PlayerColor, Config
+from sid_chess_utils import PlayerColor, Config
 import argparse
 import os
-from enum import Enum
+import torch.nn.utils.rnn as rnn_utils
 
 
 # %%
-
-PROBE_NAME_TO_CONFIG = {
-    "piece": chess_utils.piece_config,
-    "skill": chess_utils.skill_config,
-    "randi": chess_utils.randi_probe_config,
-    "can_check": chess_utils.can_check_config,
-    "can_checkmate": chess_utils.can_checkmate_config,
-    "can_en_passant": chess_utils.can_en_passant_config,
-    "can_move_ambiguously": chess_utils.can_move_ambiguously_config,
-    "can_capture_queen": chess_utils.can_capture_queen,
-    "is_check": chess_utils.is_check_config
-}
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +40,13 @@ if not logger.handlers:
     logger.addHandler(handler)
 
 MODEL_DIR = "models/"
-DATA_DIR = "data/"
+# DATA_DIR = "data/"
+DATA_DIR = "data_variable_string_lengths/"
 PROBE_DIR = "linear_probes/"
 # SAVED_PROBE_DIR = "linear_probes/saved_probes/"
 # SAVED_PROBE_DIR = "linear_probes/sidprobes/"
-SAVED_PROBE_DIR = "linear_probes/good_piece_probes/"
+# SAVED_PROBE_DIR = "linear_probes/10000game_cancheck/"
+SAVED_PROBE_DIR = "linear_probes/10000game_cancheck_trainedOnVariableLengthStrings/"
 WANDB_PROJECT = "chess_linear_probes"
 BATCH_SIZE = 2
 D_MODEL = 512
@@ -96,10 +86,10 @@ class TrainingParams:
     lr: float = 0.001
     beta1: float = 0.9
     beta2: float = 0.99
-    max_train_games: int = 5000
+    max_train_games: int = 10000
     max_test_games: int = 10000
     max_val_games: int = 1000
-    max_iters: int = 25000
+    max_iters: int = 50000
     eval_iters: int = 50
     num_epochs: int = max_iters // max_train_games
 
@@ -141,6 +131,7 @@ class LinearProbeData:
     model: HookedTransformer
     custom_indices: torch.Tensor
     board_seqs_int: torch.Tensor
+    is_valid_mask: torch.Tensor
     board_seqs_string: list[str]
     skill_stack: torch.Tensor
     user_state_dict_one_hot_mapping: Optional[dict[int, int]] = None
@@ -268,23 +259,23 @@ def get_board_seqs_string(df: pd.DataFrame) -> list[str]:
         return get_othello_seqs_string(df)
 
     key = "transcript"
-    row_length = len(df[key].iloc[0])
+    # row_length = len(df[key].iloc[0])
 
-    assert all(
-        df[key].apply(lambda x: len(x) == row_length)
-    ), "Not all transcripts are of length {}".format(row_length)
+    # assert all(
+    #     df[key].apply(lambda x: len(x) == row_length)
+    # ), "Not all transcripts are of length {}".format(row_length)
 
     board_seqs_string_Bl = df[key]
 
     logger.info(
-        f"Number of games: {len(board_seqs_string_Bl)},length of a game in chars: {len(board_seqs_string_Bl[0])}"
+        f"Number of games: {len(board_seqs_string_Bl)}"#,length of a game in chars: {len(board_seqs_string_Bl[0])}"
     )
-    n=0
-    for seq in board_seqs_string_Bl:
-        if '#' in seq:
-            print(seq)
-            n+=1
-    print(n/len(board_seqs_string_Bl))
+    # n=0
+    # for seq in board_seqs_string_Bl:
+    #     if '#' in seq:
+    #         print(seq)
+    #         n+=1
+    # print(n/len(board_seqs_string_Bl))
     return board_seqs_string_Bl
 
 
@@ -303,7 +294,9 @@ def get_board_seqs_int(df: pd.DataFrame) -> Int[Tensor, "num_games pgn_str_lengt
 
     encoded_df = df["transcript"].apply(encode)
     logger.info(encoded_df.head())
-    board_seqs_int_Bl = torch.tensor(encoded_df.apply(list).tolist())
+    
+    board_seqs_int_Bl = rnn_utils.pad_sequence([torch.Tensor(toks).to(dtype=torch.int) for toks in encoded_df.apply(list).tolist()], batch_first=True, padding_value=0)
+
     logger.info(f"board_seqs_int shape: {board_seqs_int_Bl.shape}")
     return board_seqs_int_Bl
 
@@ -319,7 +312,7 @@ def get_skill_stack(config: Config, df: pd.DataFrame) -> Int[Tensor, "num_games"
 
 
 def get_othello_state_stack(
-    config: chess_utils.Config, games_str_Bl: list[str]
+    config: sid_chess_utils.Config, games_str_Bl: list[str]
 ) -> Int[Tensor, "modes batch num_white_moves num_rows num_cols"]:
     state_stack_MBLRRC = config.custom_board_state_function(games_str_Bl)
     return state_stack_MBLRRC
@@ -334,17 +327,20 @@ def prepare_data_batch(
 ) -> tuple[
     Int[Tensor, "modes batch_size num_white_moves num_rows num_cols num_options"],
     dict[int, Float[Tensor, "batch_size num_white_moves d_model"]],
+    Float[Tensor, "batch_size num_white_moves"],
 ]:
     list_of_indices = indices.tolist()  # For indexing into the board_seqs_string list of strings
     games_int_Bl = probe_data.board_seqs_int[
         indices
     ]  # games_int shape (batch_size, pgn_str_length)
+    # print(games_int_Bl.shape)
     games_str_Bl = [probe_data.board_seqs_string[idx] for idx in list_of_indices]
     games_str_Bl = [s[:] for s in games_str_Bl]
     games_dots_BL = probe_data.custom_indices[indices]
     games_dots_BL = games_dots_BL[
         :, config.pos_start : config.pos_end
     ]  # games_dots shape (batch_size, num_white_moves)
+    valid_mask_sliced = probe_data.is_valid_mask[indices, config.pos_start : config.pos_end]
 
     if config.probing_for_skill:
         games_skill_B = probe_data.skill_stack[indices]  # games_skill shape (batch_size,)
@@ -360,11 +356,11 @@ def prepare_data_batch(
         )
 
     else:
-        state_stack_MBlRR = chess_utils.create_state_stacks(
+        state_stack_MBlRR = sid_chess_utils.create_state_stacks(
             games_str_Bl, config.custom_board_state_function, games_skill_B
         )  # shape (modes, batch_size, pgn_str_length, num_rows, num_cols)
 
-        state_stack_one_hot_MBlRRC = chess_utils.state_stack_to_one_hot(
+        state_stack_one_hot_MBlRRC = sid_chess_utils.state_stack_to_one_hot(
             TRAIN_PARAMS.modes,
             config.num_rows,
             config.num_cols,
@@ -428,7 +424,7 @@ def prepare_data_batch(
             indexed_resid_posts_BLD
         )  # shape (batch_size, num_white_moves, d_model)
 
-    return state_stack_one_hot_MBLRRC, resid_post_dict_BLD
+    return state_stack_one_hot_MBLRRC, resid_post_dict_BLD, valid_mask_sliced.to(DEVICE,dtype=torch.float)
 
 
 def populate_probes_dict(
@@ -481,6 +477,8 @@ def linear_probe_forward_pass(
     state_stack_one_hot_MBLRRC: Int[Tensor, "modes batch num_white_moves rows cols options"],
     resid_post_BLD: Float[Tensor, "batch num_white_moves d_model"],
     one_hot_range: int,
+    is_valid_mask_BL: Float[Tensor, "batch num_white_moves"],
+    class_weights_for_loss: Optional[list[float]] = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Outputs are scalar tensors."""
     probe_out_MBLRRC = einsum(
@@ -488,30 +486,44 @@ def linear_probe_forward_pass(
         resid_post_BLD,
         linear_probe_MDRRC,
     )
+    expanded_mask = einops.rearrange(is_valid_mask_BL, "batch pos -> batch pos 1 1") # Needs to be [batch pos rows cols]
 
     assert probe_out_MBLRRC.shape == state_stack_one_hot_MBLRRC.shape
 
+    # Need to be careful and take the mean of the non-masked ones only (in position dimension)
+    # state_stack_one_hot_MBLRRC=torch.nn.functional.one_hot(torch.randint(low=0, high=one_hot_range, size=state_stack_one_hot_MBLRRC.shape[:-1])).to(DEVICE)
     accuracy = (
-        (probe_out_MBLRRC[0].argmax(-1) == state_stack_one_hot_MBLRRC[0].argmax(-1)).float().mean()
+        (einops.einsum(((probe_out_MBLRRC[0].argmax(-1) == state_stack_one_hot_MBLRRC[0].argmax(-1)) * expanded_mask), "batch pos rows cols -> batch rows cols")/einops.einsum(expanded_mask + 1e-10, "batch pos rows cols -> batch rows cols")).float().mean() # Add epsilon to prevent divide by zero
+        # (einops.einsum((((probe_out_MBLRRC[0].argmax(-1) == state_stack_one_hot_MBLRRC[0].argmax(-1)).float()) * expanded_mask.float()), "batch pos rows cols -> batch rows cols")/einops.einsum(expanded_mask, "batch pos rows cols -> batch rows cols")).mean()
     )
+
     preds = probe_out_MBLRRC[0].argmax(-1).float()
     true_labels = state_stack_one_hot_MBLRRC[0].argmax(-1).float()
-    TP = ((preds == 1).bool() & (true_labels == 1).bool()).sum().float()
-    FP = ((preds == 1).bool() & (true_labels != 1).bool()).sum().float()
-    FN = ((preds != 1).bool() & (true_labels == 1).bool()).sum().float()
-    TN = ((preds != 1).bool() & (true_labels != 1).bool()).sum().float()
+    # Only works for binary classification
+    TP = (((preds == 1) & (true_labels == 1)).float()*expanded_mask).sum()
+    FP = (((preds == 1) & (true_labels == 0)).float()*expanded_mask).sum()
+    FN = (((preds == 0) & (true_labels == 1)).float()*expanded_mask).sum()
+    TN = (((preds == 0) & (true_labels == 0)).float()*expanded_mask).sum()
 
+    fully_expanded_mask = einops.rearrange(is_valid_mask_BL, "batch pos -> 1 batch pos 1 1 1") # Needs to be [modes batch pos rows cols options]
     probe_log_probs_MBLRRC = probe_out_MBLRRC.log_softmax(-1)
+    if class_weights_for_loss is None:
+        class_weights_for_loss = torch.ones(state_stack_one_hot_MBLRRC.shape[-1]).to(DEVICE)
+    else:
+        assert len(class_weights_for_loss) == state_stack_one_hot_MBLRRC.shape[-1]
+        class_weights_for_loss = torch.tensor(class_weights_for_loss).to(DEVICE)
     probe_correct_log_probs_MLRR = (
         einops.reduce(
-            probe_log_probs_MBLRRC * state_stack_one_hot_MBLRRC,
+            einops.einsum(probe_log_probs_MBLRRC * state_stack_one_hot_MBLRRC * fully_expanded_mask, class_weights_for_loss, "modes batch pos rows cols options, options -> modes batch pos rows cols options"),
+            # probe_log_probs_MBLRRC * state_stack_one_hot_MBLRRC * fully_expanded_mask,
             "modes batch pos rows cols options -> modes pos rows cols",
             "mean",
         )
         * one_hot_range
     )  # Multiply to correct for the mean over one_hot_range
     # probe_correct_log_probs shape (modes, num_white_moves, num_rows, num_cols)
-    loss = -probe_correct_log_probs_MLRR[0, :].mean(0).sum()
+    # Take mean over positions *only where the mask is nonzero*
+    loss = -(einops.einsum(probe_correct_log_probs_MLRR[0, :], "pos rows cols -> rows cols")/einops.einsum(fully_expanded_mask, "modes batch pos rows cols options -> rows cols")).sum()
 
     return loss, accuracy, TP, TN, FP, FN
 
@@ -563,7 +575,7 @@ def estimate_loss(
         for k in range(0, eval_iters, BATCH_SIZE):
             indices = split_indices[split][k : k + BATCH_SIZE]
 
-            state_stack_one_hot_MBLRRC, resid_post_dict_BLD = prepare_data_batch(
+            state_stack_one_hot_MBLRRC, resid_post_dict_BLD, valid_mask_BL = prepare_data_batch(
                 indices, probe_data, config, layers
             )
 
@@ -573,6 +585,7 @@ def estimate_loss(
                     state_stack_one_hot_MBLRRC,
                     resid_post_dict_BLD[layer],
                     one_hot_range,
+                    valid_mask_BL,
                 )
                 losses[layer].append(loss.item())
                 accuracies[layer].append(accuracy.item())
@@ -633,17 +646,18 @@ def train_linear_probe_cross_entropy(
 
             indices_B = full_train_indices[i : i + BATCH_SIZE]  # shape batch_size
 
-            state_stack_one_hot_MBLRRC, resid_post_dict_BLD = prepare_data_batch(
+            state_stack_one_hot_MBLRRC, resid_post_dict_BLD, valid_mask_BL = prepare_data_batch(
                 indices_B, probe_data, config, layers
             )
 
             for layer in probes:
-
                 probes[layer].loss, probes[layer].accuracy, probes[layer].TP, probes[layer].TN, probes[layer].FP, probes[layer].FN = linear_probe_forward_pass(
                     probes[layer].linear_probe,
                     state_stack_one_hot_MBLRRC,
                     resid_post_dict_BLD[layer],
                     one_hot_range,
+                    valid_mask_BL,
+                    config.class_weights_for_loss,
                 )
 
                 probes[layer].loss.backward()
@@ -710,6 +724,17 @@ def train_linear_probe_cross_entropy(
                         )
             current_iter += BATCH_SIZE
         print(f"End of epoch {epoch}; TP={sum(probes[layer].TP_queue)}, TN={sum(probes[layer].TN_queue)},  FP={sum(probes[layer].FP_queue)},  FN={sum(probes[layer].FN_queue)}")
+        for layer in probes:
+            checkpoint = {
+                "linear_probe": probes[layer].linear_probe,
+                "final_loss": probes[layer].loss,
+                "iters": current_iter,
+                "epochs": epoch,
+                "acc": probes[layer].accuracy,
+            }
+            # Update the checkpoint dictionary with the contents of logging_dict
+            checkpoint.update(probes[layer].logging_dict)
+            torch.save(checkpoint, probes[layer].probe_name)
     final_accs = {}
     final_f1s = {}
     for layer in probes:
@@ -754,18 +779,26 @@ def construct_linear_probe_data(
     user_state_dict_one_hot_mapping, df = process_dataframe(input_dataframe_file, config)
     df = df[:max_games]
     board_seqs_string_Bl = get_board_seqs_string(df)
-    board_seqs_int_Bl = get_board_seqs_int(df)
     skill_stack_B = None
     if config.probing_for_skill:
         skill_stack_B = get_skill_stack(config, df)
-    custom_indices = chess_utils.find_custom_indices(
+    custom_indices, is_valid_mask_BL = sid_chess_utils.find_custom_indices(
         config.custom_indexing_function, board_seqs_string_Bl
     )
 
-    pgn_str_length = len(board_seqs_string_Bl[0])
+    # pgn_str_length = len(board_seqs_string_Bl[0])
+    maxpgn_str_length = max([len(board_seqs_string_Bl[i]) for i in range(len(board_seqs_string_Bl))])
     num_games = len(board_seqs_string_Bl)
 
-    assert board_seqs_int_Bl.shape == (num_games, pgn_str_length)
+    board_seqs_int_Bl = get_board_seqs_int(df)
+    assert board_seqs_int_Bl.shape == (num_games, maxpgn_str_length)
+    # print(is_valid_mask_BL[0])
+    # print(len(board_seqs_string_Bl[0]))
+    # print(board_seqs_string_Bl[0])
+    # print(len(board_seqs_int_Bl[0]))
+    # print(board_seqs_int_Bl[0])
+    # assert False
+    # assert(board_seqs_int_Bl[is_valid_mask_BL].sum().item() == 0)
 
     if skill_stack_B is not None:
         assert skill_stack_B.shape == (num_games,)
@@ -773,13 +806,14 @@ def construct_linear_probe_data(
     _, shortest_game_length_in_moves = custom_indices.shape
     assert custom_indices.shape == (num_games, shortest_game_length_in_moves)
 
-    if not config.pos_end:
-        config.pos_end = shortest_game_length_in_moves
+    # if not config.pos_end:
+    #     config.pos_end = shortest_game_length_in_moves
 
     probe_data = LinearProbeData(
         model=model,
         custom_indices=custom_indices,
         board_seqs_int=board_seqs_int_Bl,
+        is_valid_mask=is_valid_mask_BL,
         board_seqs_string=board_seqs_string_Bl,
         skill_stack=skill_stack_B,
         user_state_dict_one_hot_mapping=user_state_dict_one_hot_mapping,
@@ -837,15 +871,15 @@ def test_linear_probe_cross_entropy(
     for i in tqdm(range(0, num_games, BATCH_SIZE)):
         indices_B = full_test_indices[i : i + BATCH_SIZE]  # shape batch_size
 
-        state_stack_one_hot_MBLRRC, resid_post_dict_BLD = prepare_data_batch(
+        state_stack_one_hot_MBLRRC, resid_post_dict_BLD, valid_mask_BL = prepare_data_batch(
             indices_B, probe_data, config, [layer]
         )
-
         loss, accuracy, TP, TN, FP, FN  = linear_probe_forward_pass(
             linear_probe_MDRRC,
             state_stack_one_hot_MBLRRC,
             resid_post_dict_BLD[layer],
             one_hot_range,
+            valid_mask_BL,
         )
 
         accuracy_list.append(accuracy.item())
@@ -905,7 +939,7 @@ def parse_arguments():
     parser.add_argument(
         "--probe",
         type=str,
-        choices=list(PROBE_NAME_TO_CONFIG.keys()),
+        choices=["piece", "skill", "can_checkmate", "randi", "can_check", "is_check_or_mate", "is_check", "is_mate"],
         default="piece",
         help='Type of probe to use: "piece" for piece board state or "skill" for player skill level.',
     )
@@ -926,8 +960,7 @@ if __name__ == "__main__":
         saved_probes = [
             file
             for file in os.listdir(SAVED_PROBE_DIR)
-            if (os.path.isfile(os.path.join(SAVED_PROBE_DIR, file)))
-            # if (os.path.isfile(os.path.join(SAVED_PROBE_DIR, file)) and (("layer_7" in file) or ("layer_6" in file)))
+            if (os.path.isfile(os.path.join(SAVED_PROBE_DIR, file)) and (("layer_7" in file) or ("layer_6" in file)))
         ]
         # saved_probes = [
         #     "tf_lens_lichess_8layers_ckpt_no_optimizer_chess_skill_probe_layer_0.pth",
@@ -941,14 +974,14 @@ if __name__ == "__main__":
         # ]
 
         # Quick and janky way to select between piece and skill probes
-        # if args.probe == "piece":
-        #     saved_probes = [
-        #         "tf_lens_lichess_8layers_ckpt_no_optimizer_chess_piece_probe_layer_5.pth"
-        #     ]
-        # elif args.probe == "skill":
-        #     saved_probes = [
-        #         "tf_lens_lichess_8layers_ckpt_no_optimizer_chess_skill_probe_layer_5.pth"
-        #     ]
+        if args.probe == "piece":
+            saved_probes = [
+                "tf_lens_lichess_8layers_ckpt_no_optimizer_chess_piece_probe_layer_5.pth"
+            ]
+        elif args.probe == "skill":
+            saved_probes = [
+                "tf_lens_lichess_8layers_ckpt_no_optimizer_chess_skill_probe_layer_5.pth"
+            ]
 
         print(saved_probes)
 
@@ -968,7 +1001,7 @@ if __name__ == "__main__":
                     if key != "linear_probe":
                         print(key, state_dict[key])
 
-                config = chess_utils.find_config_by_name(state_dict["config_name"])
+                config = sid_chess_utils.find_config_by_name(state_dict["config_name"])
                 layer = state_dict["layer"]
                 model_name = state_dict["model_name"]
                 dataset_prefix = state_dict["dataset_prefix"]
@@ -981,7 +1014,7 @@ if __name__ == "__main__":
                 split = "test"
 
                 input_dataframe_file = f"{DATA_DIR}{dataset_prefix}{split}.csv"
-                config = chess_utils.set_config_min_max_vals_and_column_name(
+                config = sid_chess_utils.set_config_min_max_vals_and_column_name(
                     config, input_dataframe_file, dataset_prefix
                 )
 
@@ -1003,7 +1036,24 @@ if __name__ == "__main__":
                     probe_file_location, probe_data, config, logging_dict, TRAIN_PARAMS
                 )
     elif args.mode == "train":
-        config = PROBE_NAME_TO_CONFIG[args.probe]
+        if args.probe == "piece":
+            config = sid_chess_utils.piece_config
+        elif args.probe == "skill":
+            config = sid_chess_utils.skill_config
+        elif args.probe == "can_checkmate":
+            config = sid_chess_utils.can_checkmate_config
+        elif args.probe == "can_check":
+            config = sid_chess_utils.can_check_config
+        elif args.probe == "randi":
+            config = sid_chess_utils.randi_probe_config
+        elif args.probe == "is_check_or_mate":
+            config = sid_chess_utils.is_check_or_mate_config
+        elif args.probe == "is_check":
+            config = sid_chess_utils.is_check_config
+        elif args.probe == "is_mate":
+            config = sid_chess_utils.is_mate_config
+        else:
+            raise NotImplementedError
 
         othello = False
 
@@ -1021,17 +1071,17 @@ if __name__ == "__main__":
 
         if othello:
             model_name = "Baidicoot/Othello-GPT-Transformer-Lens"
-            config = chess_utils.othello_config
+            config = sid_chess_utils.othello_config
             dataset_prefix = "othello_"
             indexing_function = othello_utils.get_othello_all_list_indices
 
         input_dataframe_file = f"{DATA_DIR}{dataset_prefix}{split}.csv"
-        config = chess_utils.set_config_min_max_vals_and_column_name(
+        config = sid_chess_utils.set_config_min_max_vals_and_column_name(
             config, input_dataframe_file, dataset_prefix
         )
-        config = chess_utils.update_config_using_player_color(
-            player_color, config, indexing_function
-        )
+        # config = sid_chess_utils.update_config_using_player_color(
+        #     player_color, config, indexing_function
+        # )
 
         max_games = TRAIN_PARAMS.max_train_games + TRAIN_PARAMS.max_val_games
         probe_data = construct_linear_probe_data(

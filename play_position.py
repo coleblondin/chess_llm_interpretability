@@ -74,3 +74,22 @@ def strip_spaces_after_periods(s: str) -> str:
 pgn=play_n_moves(model=model, pgn=";1.e4 e5")
 print(pgn)
 # %%
+
+pgn=play_n_moves(model=model, pgn=strip_spaces_after_periods(";1. Na3 Na6 2. Rb1 Rb8 3. Nc4 Nc5 4. Na5 Na4 5. Nb3 Nb6 6. Na1 Na8 "))
+print(pgn)
+
+
+# %%
+pgn=play_n_moves(
+    model=model, 
+    # pgn=strip_spaces_after_periods(";"),
+    # pgn=strip_spaces_after_periods(";1. Na3 Na6 2. Rb1 Rb8 3. Nc4 Nc5 4. Na5 Na4 5. Nb3 Nb6 6. Na1 Na8 "),
+    # pgn=strip_spaces_after_periods(";1. Na3 Na6 2. Rb1 Rb8 3. Nc4 Nc5 4. Na5 Na4 5. Nb3 Nb6 6. Na1 Na8 7. e4"),
+    pgn=strip_spaces_after_periods(";1. Na3 Na6 2. Rb1 Rb8 3. Nc4 Nc5 4. Na5 Na4 5. Nb3 Nb6 6. Na1 Na8 7. e4 e5 "),
+    # pgn=strip_spaces_after_periods(";1. Na3 Na6 2. Rb1 Rb8 3. Nc4 Nc5 4. Na5 Na4 5. Nb3 Nb6 6. Na1 Na8 7. e4 e5 8. Nf3 "),
+    # pgn=strip_spaces_after_periods(";1. Na3 Na6 2. Rb1 Rb8 3. Nc4 Nc5 4. Na5 Na4 5. Nb3 Nb6 6. Na1 Na8 7. e4 e5 8. d4 "),
+    # pgn=strip_spaces_after_periods(";1. Na3 Na6 2. Rb1 Rb8 3. Nc4 Nc5 4. Na5 Na4 5. Nb3 Nb6 6. Na1 Na8 7. e4 e5 8. Nf3 d5 9. exd5 Qxd5 10. d4"),
+    # pgn=strip_spaces_after_periods(";1. Na3 Na6 2. Rb1 Rb8 3. Nc4 Nc5 4. Na5 Na4 5. Nb3 Nb6 6. Na1 Na8 7. e4 e5 8. Nf3 d5 9. exd5 Qxd5 10. d4 e4 11. c4 Qf5 12. Nd2 Nf6 13. Nc2"),
+    n=30
+)
+print(pgn)
